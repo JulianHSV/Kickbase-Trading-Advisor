@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# Versuche Plotly zu importieren – falls nicht vorhanden, automatischer Fallback
+# Versuche Plotly zu importieren – falls nicht vorhanden, automatischer Fallback auf native Charts
 PLOTLY_AVAILABLE = True
 try:
     import plotly.graph_objects as go
@@ -41,7 +41,7 @@ st.markdown("""
         font-weight: 700 !important;
     }
 </style>
-""", unsafe_allow_html=unsafe_allow_html)
+""", unsafe_allow_html=True)
 
 POS_MAP = {1: "TW", 2: "ABW", 3: "MF", 4: "ST"}
 POS_BADGE = {
@@ -195,6 +195,7 @@ def render_kicker_profile(p_dict, session, headers, league_id):
     
     # Hero Profile Header
     badge_html = POS_BADGE.get(p_dict['Pos'], '<span>-</span>')
+    formatted_mw = f"{p_dict['Aktueller MW']:,.0f} €".replace(",", ".")
     
     st.markdown(f"""
     <div class="kicker-card">
@@ -203,11 +204,11 @@ def render_kicker_profile(p_dict, session, headers, league_id):
             <div>
                 <div style="margin-bottom: 6px;">{badge_html}</div>
                 <h1 style="margin: 0; font-size: 2rem; color: #FFF;">{p_dict['Spieler']}</h1>
-                <p style="margin: 4px 0 0 0; color: #9CA3AF; font-size: 1.1rem;">Marktwert: <strong style="color: #FFF;">{p_dict['Aktueller MW']:,.0f} €</strong></p>
+                <p style="margin: 4px 0 0 0; color: #9CA3AF; font-size: 1.1rem;">Marktwert: <strong style="color: #FFF;">{formatted_mw}</strong></p>
             </div>
         </div>
     </div>
-    """.replace(",", "."), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
     # Profile Navigation Tabs
     p_tab1, p_tab2, p_tab3 = st.tabs(["📊 Kicker-Stats & Leistungsdaten", "📈 Marktwert-Historie", "🔮 Prognose (24h / 7T)"])
