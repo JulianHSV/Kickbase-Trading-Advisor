@@ -32,6 +32,7 @@ def load_kickbase_data():
         return None, None, None
 
     token = res.json().get("tkn")
+    user_id = res.json().get("u", {}).get("i")
     headers["Authorization"] = f"Bearer {token}"
 
     # 1. Liga-ID abrufen
@@ -48,36 +49,39 @@ def load_kickbase_data():
     league_id = leagues[0].get("i")
 
     # 2. Transfermarkt laden
-    market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     market_players = []
+    market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 3. Eigenen Kader über 'lineup' laden
-    lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
+    # 3. Eigenen Kader laden (v4 Squad / Lineup Endpunkte)
     my_players = []
-    if lineup_res.status_code == 200:
-        lineup_data = lineup_res.json()
-        # Kombination aus Aufstellung (p) und Bank (b)
-        my_players = (lineup_data.get("p") or []) + (lineup_data.get("b") or [])
+    squad_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/squad", headers=headers)
+    if squad_res.status_code == 200:
+        s_data = squad_res.json()
+        my_players = s_data.get("it") or s_data.get("p") or s_data.get("squad") or []
+    
+    if not my_players:
+        lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
+        if lineup_res.status_code == 200:
+            l_data = lineup_res.json()
+            my_players = (l_data.get("p") or []) + (l_data.get("b") or [])
 
-    # 4. Alle Spieler der Liga (aus allen Teams) abrufen für die vollständige Suche
-    all_league_players = []
-    users_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users", headers=headers)
-    if users_res.status_code == 200:
-        users = users_res.json().get("users") or users_res.json().get("u") or []
-        for u in users:
-            uid = u.get("i")
-            if uid:
-                u_lineup = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users/{uid}/lineup", headers=headers)
-                if u_lineup.status_code == 200:
-                    ul_data = u_lineup.json()
-                    all_league_players.extend((ul_data.get("p") or []) + (ul_data.get("b") or []))
+    # 4. Globale Datenbank: ALLE Bundesliga-Spieler laden (1. Bundesliga Competition ID = 1)
+    all_global_players = []
+    comp_res = session.get("https://api.kickbase.com/v4/competitions/1/players", headers=headers)
+    if comp_res.status_code == 200:
+        all_global_players = comp_res.json().get("it") or comp_res.json().get("p") or []
+    else:
+        # Alternative Abfrage für die gesamte Bundesliga-Datenbank
+        comp_res_alt = session.get("https://api.kickbase.com/v4/competitions/1/marketvaluechange", headers=headers)
+        if comp_res_alt.status_code == 200:
+            all_global_players = comp_res_alt.json().get("it") or comp_res_alt.json().get("p") or []
 
-    # Kombiniere Markt, eigenen Kader und zugewiesene Spieler
-    all_combined = market_players + my_players + all_league_players
+    # Zusammenführen aller Listen für die vollständige Suche
+    combined_raw = market_players + my_players + all_global_players
 
-    return market_players, my_players, all_combined
+    return market_players, my_players, combined_raw
 
 def process_player_list(players):
     if not players:
@@ -139,10 +143,10 @@ if market_raw is not None:
     st.subheader("🔍 Spielersuche & Detail-Analyse")
     
     if not df_all.empty:
-        search_options = [""] + sorted(df_all["Spieler"].unique().tolist())
+        player_names = sorted(df_all["Spieler"].unique().tolist())
         selected_name = st.selectbox(
-            "Wähle einen Spieler aus der Liga / dem Transfermarkt:",
-            options=search_options,
+            "Spieler suchen:",
+            options=[""] + player_names,
             format_func=lambda x: "Spieler suchen..." if x == "" else x
         )
 
