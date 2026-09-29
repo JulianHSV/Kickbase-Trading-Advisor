@@ -2,9 +2,11 @@ import streamlit as st
 import pandas as pd
 import requests
 
-st.set_page_config(page_title="Kickbase 7D-Prognose")
+st.set_page_config(page_title="Kickbase 7D-Prognose", layout="wide")
 
 st.title("⚽ Kickbase 7-Tage-KI-Prognose")
+
+POS_MAP = {1: "TW", 2: "ABW", 3: "MF", 4: "ST"}
 
 @st.cache_data(ttl=3600)
 def load_kickbase_data():
@@ -32,7 +34,7 @@ def load_kickbase_data():
     res = session.post(login_url, json=login_payload, headers=headers)
 
     if res.status_code != 200:
-        st.error(f"Kickbase Login fehlgeschlagen! Status: {res.status_code} - Antwort: {res.text}")
+        st.error(f"Kickbase Login fehlgeschlagen! Status: {res.status_code}")
         return None
 
     token = res.json().get("tkn")
@@ -44,54 +46,49 @@ def load_kickbase_data():
         return None
 
     leagues_data = leagues_res.json()
-    leagues = leagues_data.get("lins") or leagues_data.get("i") or leagues_data.get("leagues") or []
+    leagues = leagues_data.get("lins") or []
     
     if not leagues:
-        st.error(f"Keine Liga gefunden. Server-Antwort: {leagues_data}")
+        st.error("Keine Liga gefunden.")
         return None
 
-    first_league = leagues[0]
-    league_id = first_league.get("i") or first_league.get("id")
+    league_id = leagues[0].get("i")
 
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code != 200:
-        market_res = session.get(f"https://api.kickbase.com/v2/leagues/{league_id}/market", headers=headers)
-        if market_res.status_code != 200:
-            st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
-            return None
+        st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
+        return None
 
     market_data = market_res.json()
-    
-    # Prüfe verschiedene v4-Keys für Transfermarkt-Spieler
-    players = (
-        market_data.get("c") or 
-        market_data.get("p") or 
-        market_data.get("i") or 
-        market_data.get("players") or 
-        []
-    )
-    
-    if not players and isinstance(market_data, list):
-        players = market_data
+    players = market_data.get("it") or []
 
-    if not players:
-        st.write("Markt-Antwort vom Server:", market_data)
-        return None
-    
     processed_players = []
     for p in players:
-        mv = p.get("mv") or p.get("marketValue") or 0
-        trend = p.get("mvt") or p.get("marketValueTrend") or 1
-        name = p.get("ln") or p.get("lastName") or p.get("n") or p.get("name") or "Unbekannt"
-        pos = p.get("pos") or p.get("position") or "-"
+        mv = p.get("mv", 0)
+        mvt = p.get("mvt", 0)
+        
+        # Berechnung der Marktwert-Tendenz
+        # mvt: 1 = steigend, 2 = fallend / stagnierend
+        trend_factor = 1 if mvt == 1 else -1 if mvt == 2 else 0
+        
+        # Schätzung der 7-Tage-Prognose
+        daily_change = 100000 * trend_factor
+        pred_7d = mv + (daily_change * 7)
+        diff = pred_7d - mv
 
-        pred_7d = mv + (trend * 7 * 100000)
+        first_name = p.get("fn", "")
+        last_name = p.get("n", "Unbekannt")
+        full_name = f"{first_name} {last_name}".strip()
+
+        pos_code = p.get("pos", 0)
+        pos_str = POS_MAP.get(pos_code, "-")
+
         processed_players.append({
-            "Spieler": name,
-            "Position": pos,
-            "Aktueller MW": f"{mv:,.0f} €",
-            "Prognose (7T)": f"{pred_7d:,.0f} €",
-            "Gewinn/Verlust": f"{(pred_7d - mv):,.0f} €"
+            "Spieler": full_name,
+            "Pos": pos_str,
+            "Aktueller MW": f"{mv:,.0f} €".replace(",", "."),
+            "Prognose (7T)": f"{pred_7d:,.0f} €".replace(",", "."),
+            "Gewinn / Verlust": f"{diff:+,.0f} €".replace(",", ".")
         })
 
     return pd.DataFrame(processed_players)
@@ -100,3 +97,5 @@ data = load_kickbase_data()
 
 if data is not None and not data.empty:
     st.dataframe(data, use_container_width=True)
+elif data is not None:
+    st.info("Aktuell keine Spieler auf dem Transfermarkt verfügbar.")
