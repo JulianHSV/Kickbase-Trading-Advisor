@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="Kickbase Analyst & Prognose", layout="wide")
 
@@ -50,13 +48,13 @@ def load_kickbase_data():
 
     league_id = leagues[0].get("i")
 
-    # 1. Transfermarkt abrufen
+    # 1. Transfermarkt
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     market_players = []
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 2. Eigenes Team abrufen
+    # 2. Eigenes Team
     team_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users/{user_id}/squad", headers=headers)
     my_players = []
     if team_res.status_code == 200:
@@ -70,7 +68,6 @@ def process_player_list(players):
         mv = p.get("mv", 0)
         mvt = p.get("mvt", 0)
         
-        # Dynamische Trend-Berechnung basierend auf Status
         daily_change = p.get("mvch") or 0
         if daily_change == 0:
             daily_change = (mv * 0.0075) if mvt == 1 else -(mv * 0.0075) if mvt == 2 else 0
@@ -91,67 +88,32 @@ def process_player_list(players):
             "Prognose (24h)": pred_24h,
             "Prognose (7T)": pred_7d,
             "Gewinn / Verlust (7T)": diff_7d,
-            "Tagesveränderung": daily_change,
-            "raw_data": p
+            "Tagesveränderung": daily_change
         })
     return pd.DataFrame(data)
 
-def render_player_graph(player_row):
+def render_simple_chart(player_row):
     mv = player_row["Aktueller MW"]
     daily_change = player_row["Tagesveränderung"]
 
-    # Historische Daten (Simulation der letzten 7 Tage basierend auf aktueller Tendenz)
-    days_past = [f"Vor {i}T" for i in range(7, 0, -1)]
-    past_values = [mv - (daily_change * i) for i in range(7, 0, -1)]
+    # Datenpunkte generieren (-7 Tage bis +7 Tage)
+    labels = [f"-{i}T" for i in range(7, 0, -1)] + ["Heute"] + [f"+{i}T" for i in range(1, 8)]
+    values = [mv - (daily_change * i) for i in range(7, 0, -1)] + [mv] + [mv + (daily_change * i) for i in range(1, 8)]
 
-    # Zukunftsprognose (24h & 7 Tage)
-    days_future = ["Heute", "+24h", "+2T", "+3T", "+4T", "+5T", "+6T", "+7T"]
-    future_values = [mv + (daily_change * i) for i in range(0, 8)]
+    chart_df = pd.DataFrame({"Tag": labels, "Marktwert (€)": values}).set_index("Tag")
+    st.line_chart(chart_df)
 
-    fig = go.Figure()
-
-    # Historie
-    fig.add_trace(go.Scatter(
-        x=days_past + ["Heute"],
-        y=past_values + [mv],
-        mode='lines+markers',
-        name='Vergangenheit',
-        line=dict(color='#00CC96', width=3)
-    ))
-
-    # Prognose
-    fig.add_trace(go.Scatter(
-        x=days_future,
-        y=future_values,
-        mode='lines+markers',
-        name='Prognose (KI)',
-        line=dict(color='#FF6666', width=3, dash='dash')
-    ))
-
-    fig.update_layout(
-        title=f"Marktwertverlauf & Prognose: {player_row['Spieler']}",
-        xaxis_title="Zeitraum",
-        yaxis_title="Marktwert (€)",
-        template="plotly_dark",
-        margin=dict(l=20, r=20, t=50, b=20)
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-# Haupt-Workflow
 market_raw, my_raw, headers = load_kickbase_data()
 
 if market_raw is not None:
     df_market = process_player_list(market_raw)
     df_my = process_player_list(my_raw)
 
-    # Alle verfügbaren Spieler zusammenführen für die Suche
     all_players_df = pd.concat([df_market, df_my]).drop_duplicates(subset=['ID'])
 
-    # --- SUCHLEISTE ---
-    st.subheader("🔍 Spielersuche")
+    st.subheader("🔍 Spielersuche & Detail-Analyse")
     search_query = st.selectbox(
-        "Wähle einen Spieler für die Detail-Analyse & Graph:",
+        "Spieler auswählen:",
         options=[""] + list(all_players_df["Spieler"].unique()),
         format_func=lambda x: "Spieler suchen..." if x == "" else x
     )
@@ -165,15 +127,15 @@ if market_raw is not None:
         col3.metric("Prognose (24h)", f"{selected_player['Prognose (24h)']:,.0f} €".replace(",", "."))
         col4.metric("Gewinn / Verlust (7T)", f"{selected_player['Gewinn / Verlust (7T)']:+,.0f} €".replace(",", "."))
 
-        render_player_graph(selected_player)
+        st.caption("Marktwert-Verlauf (Vergangenheit & 7-Tage-Prognose)")
+        render_simple_chart(selected_player)
         st.markdown("---")
 
-    # --- TABS FÜR TRANSFERS & KADER ---
     tab1, tab2 = st.tabs(["🛒 Transfermarkt", "🛡️ Mein Kader"])
 
     with tab1:
         if not df_market.empty:
-            display_df = df_market.drop(columns=["ID", "raw_data", "Tagesveränderung"]).copy()
+            display_df = df_market.drop(columns=["ID", "Tagesveränderung"]).copy()
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 display_df[col] = display_df[col].map("{:,.0f} €".format).str.replace(",", ".")
             st.dataframe(display_df, use_container_width=True)
@@ -182,7 +144,7 @@ if market_raw is not None:
 
     with tab2:
         if not df_my.empty:
-            display_my = df_my.drop(columns=["ID", "raw_data", "Tagesveränderung"]).copy()
+            display_my = df_my.drop(columns=["ID", "Tagesveränderung"]).copy()
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 display_my[col] = display_my[col].map("{:,.0f} €".format).str.replace(",", ".")
             st.dataframe(display_my, use_container_width=True)
