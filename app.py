@@ -16,7 +16,7 @@ def load_kickbase_data():
         return None
 
     session = requests.Session()
-    login_url = "https://api.kickbase.com/v2/users/login"
+    login_url = "https://api.kickbase.com/v2/user/login"
     headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
     login_payload = {"email": email, "password": password}
 
