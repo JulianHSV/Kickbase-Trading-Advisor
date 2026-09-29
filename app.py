@@ -38,7 +38,7 @@ def load_kickbase_data():
     token = res.json().get("tkn")
     headers["Authorization"] = f"Bearer {token}"
 
-    leagues_res = session.get("https://api.kickbase.com/v2/leagues", headers=headers)
+    leagues_res = session.get("https://api.kickbase.com/v4/leagues", headers=headers)
     if leagues_res.status_code != 200:
         st.error(f"Fehler beim Laden der Ligen. Status: {leagues_res.status_code}")
         return None
@@ -50,7 +50,7 @@ def load_kickbase_data():
 
     league_id = leagues[0]["id"]
 
-    market_res = session.get(f"https://api.kickbase.com/v2/leagues/{league_id}/market", headers=headers)
+    market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code != 200:
         st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
         return None
