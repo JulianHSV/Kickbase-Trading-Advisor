@@ -2,55 +2,9 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# Versuche Plotly zu importieren – falls nicht vorhanden, automatischer Fallback auf native Charts
-PLOTLY_AVAILABLE = True
-try:
-    import plotly.graph_objects as go
-except ImportError:
-    PLOTLY_AVAILABLE = False
-
 st.set_page_config(page_title="Kickbase Analyst Pro", layout="wide", page_icon="⚽")
 
-# Custom CSS für Kicker-App Optik
-st.markdown("""
-<style>
-    /* Haupt-Hintergrund & Schrift */
-    .stApp {
-        background-color: #0E1117;
-        color: #E0E6ED;
-    }
-    
-    /* Custom Card Style */
-    .kicker-card {
-        background-color: #1A1D24;
-        border: 1px solid #2A2E39;
-        border-radius: 10px;
-        padding: 16px;
-        margin-bottom: 12px;
-    }
-    
-    /* Position Badges */
-    .badge-tw { background-color: #D97706; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-abw { background-color: #2563EB; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-mf { background-color: #10B981; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-st { background-color: #EF4444; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    
-    /* Metrik Container Styling */
-    div[data-testid="stMetricValue"] {
-        font-size: 1.4rem !important;
-        font-weight: 700 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
 POS_MAP = {1: "TW", 2: "ABW", 3: "MF", 4: "ST"}
-POS_BADGE = {
-    "TW": '<span class="badge-tw">TW</span>',
-    "ABW": '<span class="badge-abw">ABW</span>',
-    "MF": '<span class="badge-mf">MF</span>',
-    "ST": '<span class="badge-st">ST</span>',
-    "-": '<span>-</span>'
-}
 
 def get_kickbase_session():
     email = st.secrets.get("KB_EMAIL")
@@ -83,12 +37,17 @@ def get_kickbase_session():
     league_id = leagues_res.json()["lins"][0].get("i")
     return session, headers, league_id
 
-def search_kickbase_api(session, headers, league_id, query):
+def search_global_players(session, headers, query):
     if not query or len(query.strip()) < 2:
         return []
-    res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/players?q={query.strip()}", headers=headers)
+    
+    # Globale Kickbase-Suche ohne Liga-Einschränkung
+    search_url = f"https://api.kickbase.com/v4/players?q={query.strip()}"
+    res = session.get(search_url, headers=headers)
+    
     if res.status_code == 200:
-        return res.json().get("it") or res.json().get("p") or []
+        data = res.json()
+        return data.get("p") or data.get("it") or []
     return []
 
 def get_player_details(session, headers, league_id, player_id):
@@ -154,64 +113,24 @@ def process_player_list(players):
             data.append(p_data)
     return pd.DataFrame(data)
 
-def render_chart(player_dict, chart_type="history"):
-    mv = player_dict["Aktueller MW"]
-    daily_change = player_dict["Tagesveränderung"]
-
-    if chart_type == "history":
-        x_vals = [f"-{i}T" for i in range(7, 0, -1)] + ["Heute"]
-        y_vals = [mv - (daily_change * i) for i in range(7, 0, -1)] + [mv]
-        color = "#10B981"
-        title_text = "Historischer Marktwertverlauf (Letzte 7 Tage)"
-    else: # prognosis
-        x_vals = ["Heute", "+24h"] + [f"+{i}T" for i in range(2, 8)]
-        y_vals = [mv, mv + daily_change] + [mv + (daily_change * i) for i in range(2, 8)]
-        color = "#8B5CF6"
-        title_text = "Marktwert-Prognose (Nächste 7 Tage)"
-
-    if PLOTLY_AVAILABLE:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=x_vals, y=y_vals,
-            mode='lines+markers',
-            line=dict(color=color, width=3),
-            marker=dict(size=6)
-        ))
-        fig.update_layout(
-            title=title_text,
-            template="plotly_dark",
-            margin=dict(l=20, r=20, t=40, b=20),
-            height=300,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        chart_df = pd.DataFrame({"Marktwert (€)": y_vals}, index=x_vals)
-        st.line_chart(chart_df, height=300)
-
 def render_kicker_profile(p_dict, session, headers, league_id):
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.divider()
     
-    # Hero Profile Header
-    badge_html = POS_BADGE.get(p_dict['Pos'], '<span>-</span>')
-    formatted_mw = f"{p_dict['Aktueller MW']:,.0f} €".replace(",", ".")
+    # Header wie in der Kicker-App
+    col_img, col_info = st.columns([1, 4])
+    with col_img:
+        if p_dict.get("Image"):
+            st.image(p_dict["Image"], width=120)
     
-    st.markdown(f"""
-    <div class="kicker-card">
-        <div style="display: flex; align-items: center; gap: 20px;">
-            <img src="{p_dict['Image']}" style="width: 110px; height: 110px; border-radius: 50%; object-fit: cover; border: 3px solid #2A2E39;">
-            <div>
-                <div style="margin-bottom: 6px;">{badge_html}</div>
-                <h1 style="margin: 0; font-size: 2rem; color: #FFF;">{p_dict['Spieler']}</h1>
-                <p style="margin: 4px 0 0 0; color: #9CA3AF; font-size: 1.1rem;">Marktwert: <strong style="color: #FFF;">{formatted_mw}</strong></p>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    with col_info:
+        st.subheader(f"{p_dict['Spieler']} ({p_dict['Pos']})")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Marktwert", f"{p_dict['Aktueller MW']:,.0f} €".replace(",", "."))
+        m2.metric("Tagesveränderung", f"{p_dict['Tagesveränderung']:+,.0f} €".replace(",", "."))
+        m3.metric("Prognose (7T)", f"{p_dict['Prognose (7T)']:,.0f} €".replace(",", "."))
 
-    # Profile Navigation Tabs
-    p_tab1, p_tab2, p_tab3 = st.tabs(["📊 Kicker-Stats & Leistungsdaten", "📈 Marktwert-Historie", "🔮 Prognose (24h / 7T)"])
+    # Kicker-Tabs für Statistiken, Historie und Prognose
+    p_tab1, p_tab2, p_tab3 = st.tabs(["📊 Saison-Statistiken", "📈 MW-Historie (7 Tage)", "🔮 7-Tage-Prognose"])
 
     with p_tab1:
         details = get_player_details(session, headers, league_id, p_dict["ID"])
@@ -221,8 +140,6 @@ def render_kicker_profile(p_dict, session, headers, league_id):
         c3.metric("Tore ⚽", details.get("g", 0))
         c4.metric("Vorlagen 👟", details.get("a", 0))
 
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-
         c5, c6, c7, c8 = st.columns(4)
         c5.metric("Gelbe Karten 🟨", details.get("yc", 0))
         c6.metric("Rote Karten 🟥", details.get("rc", 0))
@@ -230,20 +147,25 @@ def render_kicker_profile(p_dict, session, headers, league_id):
         c8.metric("Startelf 🏃", details.get("s11", 0))
 
     with p_tab2:
-        m1, m2 = st.columns(2)
-        m1.metric("Aktueller Marktwert", f"{p_dict['Aktueller MW']:,.0f} €".replace(",", "."))
-        m2.metric("Tagesveränderung (24h)", f"{p_dict['Tagesveränderung']:+,.0f} €".replace(",", "."))
-        render_chart(p_dict, chart_type="history")
+        mv = p_dict["Aktueller MW"]
+        daily_change = p_dict["Tagesveränderung"]
+        x_hist = [f"-{i}T" for i in range(7, 0, -1)] + ["Heute"]
+        y_hist = [mv - (daily_change * i) for i in range(7, 0, -1)] + [mv]
+        
+        hist_df = pd.DataFrame({"Marktwert (€)": y_hist}, index=x_hist)
+        st.line_chart(hist_df, height=300)
 
     with p_tab3:
-        p1, p2, p3 = st.columns(3)
-        p1.metric("Prognose (24h)", f"{p_dict['Prognose (24h)']:,.0f} €".replace(",", "."))
-        p2.metric("Prognose (7T)", f"{p_dict['Prognose (7T)']:,.0f} €".replace(",", "."))
-        p3.metric("Erwarteter Gewinn/Verlust (7T)", f"{p_dict['Gewinn / Verlust (7T)']:+,.0f} €".replace(",", "."))
-        render_chart(p_dict, chart_type="prognosis")
+        mv = p_dict["Aktueller MW"]
+        daily_change = p_dict["Tagesveränderung"]
+        x_prog = ["Heute", "+24h"] + [f"+{i}T" for i in range(2, 8)]
+        y_prog = [mv, mv + daily_change] + [mv + (daily_change * i) for i in range(2, 8)]
+        
+        prog_df = pd.DataFrame({"Prognose (€)": y_prog}, index=x_prog)
+        st.line_chart(prog_df, height=300)
 
-# Hauptlogik
-st.title("⚽ Kickbase Analyst Pro")
+# Hauptanwendung
+st.title("⚽ Kickbase Analyst")
 
 session, headers, league_id = get_kickbase_session()
 
@@ -252,13 +174,13 @@ if session:
     df_market = process_player_list(market_raw)
     df_my = process_player_list(my_raw)
 
-    # Suchleiste
+    # Spielersuche
     search_query = st.text_input("🔍 Spielersuche (Gesamte Bundesliga):", placeholder="z. B. Kane, Musiala, Wirtz...")
 
     selected_player_dict = None
 
     if search_query.strip():
-        search_results = search_kickbase_api(session, headers, league_id, search_query.strip())
+        search_results = search_global_players(session, headers, search_query.strip())
         if search_results:
             options_map = {}
             for p in search_results:
@@ -266,13 +188,13 @@ if session:
                 label = f"{p_processed['Spieler']} ({p_processed['Pos']} | {p_processed['Aktueller MW']:,.0f} €)".replace(",", ".")
                 options_map[label] = p_processed
 
-            chosen_label = st.selectbox("Gefundene Spieler (Auswählen):", options=list(options_map.keys()))
+            chosen_label = st.selectbox("Ergebnisse auswählen:", options=list(options_map.keys()))
             if chosen_label:
                 selected_player_dict = options_map[chosen_label]
         else:
             st.warning(f"Kein Spieler mit '{search_query}' gefunden.")
 
-    # Haupt-Tabs
+    # Hauptansicht (Transfermarkt / Kader)
     tab_m, tab_k = st.tabs(["🛒 Transfermarkt", "🛡️ Mein Kader"])
 
     with tab_m:
@@ -281,7 +203,7 @@ if session:
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 disp[col] = disp[col].map("{:,.0f} €".format).str.replace(",", ".")
             
-            st.caption("👇 Klicke auf eine Zeile, um das Kicker-Profil des Spielers zu öffnen:")
+            st.caption("Klicke auf eine Zeile, um das Kicker-Profil des Spielers anzuzeigen:")
             event_m = st.dataframe(disp, use_container_width=True, on_select="rerun", selection_mode="single-row")
             
             rows = event_m.get("selection", {}).get("rows", [])
@@ -296,7 +218,7 @@ if session:
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 disp_my[col] = disp_my[col].map("{:,.0f} €".format).str.replace(",", ".")
             
-            st.caption("👇 Klicke auf eine Zeile, um das Kicker-Profil des Spielers zu öffnen:")
+            st.caption("Klicke auf eine Zeile, um das Kicker-Profil des Spielers anzuzeigen:")
             event_k = st.dataframe(disp_my, use_container_width=True, on_select="rerun", selection_mode="single-row")
             
             rows_k = event_k.get("selection", {}).get("rows", [])
@@ -305,6 +227,6 @@ if session:
         else:
             st.info("Keine Spieler im Kader gefunden.")
 
-    # Profilausgabe
+    # Profilansicht unter den Tabellen
     if selected_player_dict:
         render_kicker_profile(selected_player_dict, session, headers, league_id)
