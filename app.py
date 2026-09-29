@@ -17,13 +17,14 @@ def load_kickbase_data():
         st.error("Bitte KB_EMAIL und KB_PASSWORD in den Streamlit Secrets hinterlegen!")
         return None
     
-    session = requests.Session()
+        session = requests.Session()
     login_url = "https://api.kickbase.com/v2/users/login"
+    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
     login_payload = {"email": email, "password": password}
-    
-    res = session.post(login_url, json=login_payload)
+
+    res = session.post(login_url, json=login_payload, headers=headers)
     if res.status_code != 200:
-        st.error("Kickbase Login fehlgeschlagen! Zugangsdaten prüfen.")
+        st.error(f"Kickbase Login fehlgeschlagen! Status: {res.status_code} - Antwort: {res.text}")
         return None
     
     token = res.json().get("token")
