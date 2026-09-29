@@ -4,28 +4,14 @@ import requests
 
 st.set_page_config(page_title="Kickbase Analyst Pro", layout="wide", page_icon="⚽")
 
-# Custom CSS für Kicker-Optik & abwechselnde Farben
+# Sauberes Kicker-Theme
 st.markdown("""
 <style>
     .stApp { background-color: #0E1117; color: #E0E6ED; }
-    
-    /* Positions-Badges */
     .badge-tw { background-color: #D97706; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-    .badge-abw { background-color: #2563EB; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-mf { background-color: #10B981; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    .badge-st { background-color: #EF4444; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 12px; }
-    
-    /* Kicker Player Card */
-    .player-card {
-        background-color: #1A1D24;
-        border: 1px solid #2A2E39;
-        border-radius: 8px;
-        padding: 12px;
-        margin-bottom: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
+    .badge-abw { background-color: #2563EB; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+    .badge-mf { background-color: #10B981; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+    .badge-st { background-color: #EF4444; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -67,36 +53,6 @@ def get_kickbase_session():
     league_id = leagues_res.json()["lins"][0].get("i")
     return session, headers, league_id
 
-@st.cache_data(ttl=900)
-def load_all_league_data():
-    session, headers, league_id = get_kickbase_session()
-    if not session:
-        return [], [], []
-
-    # 1. Transfermarkt
-    market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
-    market_players = market_res.json().get("it", []) if market_res.status_code == 200 else []
-
-    # 2. Kader mit doppeltem Fallback
-    my_players = []
-    lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
-    if lineup_res.status_code == 200:
-        l_data = lineup_res.json()
-        my_players = (l_data.get("p") or []) + (l_data.get("b") or [])
-    
-    if not my_players:
-        squad_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/squad", headers=headers)
-        if squad_res.status_code == 200:
-            my_players = squad_res.json().get("it") or squad_res.json().get("p") or []
-
-    # 3. Alle Bundesliga-Spieler für die Suchleiste laden (Verhindert Such-Abstürze)
-    all_players = []
-    all_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
-    # Kombiniere Markt & Kader als Basis-Pool
-    all_players = market_players + my_players
-
-    return market_players, my_players, all_players
-
 def process_player(p):
     pid = p.get("i")
     mv = p.get("mv", 0)
@@ -115,6 +71,7 @@ def process_player(p):
         "Pos": POS_MAP.get(p.get("pos", 0), "-"),
         "Aktueller MW": mv,
         "Prognose (24h)": mv + daily_change,
+        "Prognose (72h)": mv + (daily_change * 3),
         "Prognose (7T)": mv + (daily_change * 7),
         "Gewinn / Verlust (7T)": daily_change * 7,
         "Tagesveränderung": daily_change,
@@ -122,6 +79,39 @@ def process_player(p):
         "Total Points": p.get("tP", 0),
         "Average Points": p.get("aP", 0)
     }
+
+@st.cache_data(ttl=900)
+def load_league_data():
+    session, headers, league_id = get_kickbase_session()
+    if not session:
+        return [], []
+
+    # Transfermarkt
+    market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
+    market_players = market_res.json().get("it", []) if market_res.status_code == 200 else []
+
+    # Kader
+    my_players = []
+    lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
+    if lineup_res.status_code == 200:
+        l_data = lineup_res.json()
+        my_players = (l_data.get("p") or []) + (l_data.get("b") or [])
+    
+    if not my_players:
+        squad_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/squad", headers=headers)
+        if squad_res.status_code == 200:
+            my_players = squad_res.json().get("it") or squad_res.json().get("p") or []
+
+    return [process_player(p) for p in market_players], [process_player(p) for p in my_players]
+
+def search_global(session, headers, league_id, query):
+    if not query or len(query.strip()) < 2:
+        return []
+    res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/players?q={query.strip()}", headers=headers)
+    if res.status_code == 200:
+        raw = res.json().get("it") or res.json().get("p") or []
+        return [process_player(p) for p in raw]
+    return []
 
 def get_player_details(session, headers, league_id, player_id):
     res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/players/{player_id}/profile", headers=headers)
@@ -137,13 +127,14 @@ def render_kicker_profile(p_dict, session, headers, league_id):
     
     with col_info:
         badge_html = POS_BADGE.get(p_dict['Pos'], '')
-        st.markdown(f"### {p_dict['Spieler']} {badge_html}", unsafe_allow_html=True)
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Marktwert", f"{p_dict['Aktueller MW']:,.0f} €".replace(",", "."))
-        m2.metric("24h Trend", f"{p_dict['Tagesveränderung']:+,.0f} €".replace(",", "."))
-        m3.metric("7-Tage-Prognose", f"{p_dict['Prognose (7T)']:,.0f} €".replace(",", "."))
+        st.markdown(f"## {p_dict['Spieler']} {badge_html}", unsafe_allow_html=True)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Aktueller MW", f"{p_dict['Aktueller MW']:,.0f} €".replace(",", "."))
+        m2.metric("Prognose (24h)", f"{p_dict['Prognose (24h)']:,.0f} €".replace(",", "."))
+        m3.metric("Prognose (72h)", f"{p_dict['Prognose (72h)']:,.0f} €".replace(",", "."))
+        m4.metric("Prognose (7T)", f"{p_dict['Prognose (7T)']:,.0f} €".replace(",", "."))
 
-    p_tab1, p_tab2, p_tab3 = st.tabs(["📊 Kicker-Stats & Leistungsdaten", "📈 MW-Historie", "🔮 Prognose"])
+    p_tab1, p_tab2, p_tab3 = st.tabs(["📊 Kicker-Stats & Leistungsdaten", "📈 MW-Historie (7T)", "🔮 Trend-Graph (24h / 72h / 7T)"])
 
     with p_tab1:
         details = get_player_details(session, headers, league_id, p_dict["ID"])
@@ -169,72 +160,65 @@ def render_kicker_profile(p_dict, session, headers, league_id):
     with p_tab3:
         mv = p_dict["Aktueller MW"]
         dc = p_dict["Tagesveränderung"]
-        x_prog = ["Heute", "+24h"] + [f"+{i}T" for i in range(2, 8)]
-        y_prog = [mv, mv + dc] + [mv + (dc * i) for i in range(2, 8)]
+        x_prog = ["Heute", "+24h", "+72h", "+7T"]
+        y_prog = [mv, mv + dc, mv + (dc * 3), mv + (dc * 7)]
         st.line_chart(pd.DataFrame({"Prognose (€)": y_prog}, index=x_prog), height=280)
 
-# App-Start
+# App Start
 st.title("⚽ Kickbase Analyst Pro")
 
 session, headers, league_id = get_kickbase_session()
 
-if "selected_player" not in st.session_state:
-    st.session_state.selected_player = None
-
 if session:
-    market_raw, my_raw, all_raw = load_all_league_data()
+    market_players, my_players = load_league_data()
     
-    # Lokale Echtzeit-Suche ohne API-Fehler
-    search_query = st.text_input("🔍 Spielersuche:", placeholder="Name eingeben (z. B. Zentner, Posch, Kane)...")
+    # Suchleiste
+    search_query = st.text_input("🔍 Spielersuche (Gesamte Bundesliga):", placeholder="z. B. Kane, Musiala, Zentner...")
+    selected_player = None
 
     if search_query.strip():
-        q = search_query.lower().strip()
-        matches = [process_player(p) for p in all_raw if q in p.get("n", "").lower() or q in p.get("fn", "").lower()]
-        
-        if matches:
-            st.write(f"**Gefundene Spieler ({len(matches)}):**")
-            for m in matches:
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.write(f"**{m['Spieler']}** ({m['Pos']}) – {m['Aktueller MW']:,.0f} €".replace(",", "."))
-                with col2:
-                    if st.button("Profil öffnen", key=f"search_{m['ID']}"):
-                        st.session_state.selected_player = m
+        search_results = search_global(session, headers, league_id, search_query.strip())
+        if search_results:
+            options = {f"{p['Spieler']} ({p['Pos']} | {p['Aktueller MW']:,.0f} €)".replace(",", "."): p for p in search_results}
+            chosen = st.selectbox("Gefundene Spieler auswählen:", options=list(options.keys()))
+            if chosen:
+                selected_player = options[chosen]
         else:
-            st.warning(f"Kein Spieler in deiner Liga-Datenbank für '{search_query}' gefunden.")
+            st.warning(f"Kein Spieler mit '{search_query}' gefunden.")
 
-    # Hauptansicht Tabs
+    # Haupt-Tabs
     tab_m, tab_k = st.tabs(["🛒 Transfermarkt", "🛡️ Mein Kader"])
 
-    def render_player_list(raw_list, prefix):
-        if not raw_list:
-            st.info("Keine Spieler vorhanden.")
-            return
-
-        # Tabelle mit abwechselnden Farben über Pandas HTML-Export
-        parsed_players = [process_player(p) for p in raw_list]
-        
-        for p_data in parsed_players:
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-            with c1:
-                badge = POS_BADGE.get(p_data['Pos'], '')
-                st.markdown(f"**{p_data['Spieler']}** {badge}", unsafe_allow_html=True)
-            with c2:
-                st.write(f"{p_data['Aktueller MW']:,.0f} €".replace(",", "."))
-            with c3:
-                color = "green" if p_data['Gewinn / Verlust (7T)'] >= 0 else "red"
-                st.markdown(f"<span style='color:{color};'>{p_data['Gewinn / Verlust (7T)']:+,.0f} €</span>".replace(",", "."), unsafe_allow_html=True)
-            with c4:
-                if st.button("Profil", key=f"{prefix}_{p_data['ID']}"):
-                    st.session_state.selected_player = p_data
-            st.divider()
-
     with tab_m:
-        render_player_list(market_raw, "m")
+        if market_players:
+            df_m = pd.DataFrame(market_players)
+            disp_m = df_m[["Spieler", "Pos", "Aktueller MW", "Prognose (24h)", "Prognose (72h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]].copy()
+            for col in ["Aktueller MW", "Prognose (24h)", "Prognose (72h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
+                disp_m[col] = disp_m[col].map("{:,.0f} €".format).str.replace(",", ".")
+            
+            st.caption("Wähle eine Zeile aus, um das Kicker-Profil anzuzeigen:")
+            event_m = st.dataframe(disp_m, use_container_width=True, on_select="rerun", selection_mode="single-row")
+            rows_m = event_m.get("selection", {}).get("rows", [])
+            if rows_m:
+                selected_player = market_players[rows_m[0]]
+        else:
+            st.info("Keine Spieler auf dem Transfermarkt.")
 
     with tab_k:
-        render_player_list(my_raw, "k")
+        if my_players:
+            df_k = pd.DataFrame(my_players)
+            disp_k = df_k[["Spieler", "Pos", "Aktueller MW", "Prognose (24h)", "Prognose (72h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]].copy()
+            for col in ["Aktueller MW", "Prognose (24h)", "Prognose (72h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
+                disp_k[col] = disp_k[col].map("{:,.0f} €".format).str.replace(",", ".")
+            
+            st.caption("Wähle eine Zeile aus, um das Kicker-Profil anzuzeigen:")
+            event_k = st.dataframe(disp_k, use_container_width=True, on_select="rerun", selection_mode="single-row")
+            rows_k = event_k.get("selection", {}).get("rows", [])
+            if rows_k:
+                selected_player = my_players[rows_k[0]]
+        else:
+            st.info("Keine Spieler im Kader gefunden.")
 
-    # Profil unten anzeigen, wenn ausgewählt
-    if st.session_state.selected_player:
-        render_kicker_profile(st.session_state.selected_player, session, headers, league_id)
+    # Profil anzeigen
+    if selected_player:
+        render_kicker_profile(selected_player, session, headers, league_id)
