@@ -43,28 +43,39 @@ def load_kickbase_data():
         st.error(f"Fehler beim Laden der Ligen. Status: {leagues_res.status_code}")
         return None
 
-    leagues = leagues_res.json().get("leagues", [])
+    leagues_data = leagues_res.json()
+    # In v4 liegt die Liste im Key 'i' oder 'leagues'
+    leagues = leagues_data.get("i") or leagues_data.get("leagues") or []
+    
     if not leagues:
-        st.error("Keine Liga gefunden.")
+        st.error(f"Keine Liga gefunden. Server-Antwort: {leagues_data}")
         return None
 
-    league_id = leagues[0]["id"]
+    first_league = leagues[0]
+    league_id = first_league.get("id") or first_league.get("i")
 
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code != 200:
-        st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
-        return None
+        # Fallback auf v2, falls Transfermarkt-Endpunkt abweicht
+        market_res = session.get(f"https://api.kickbase.com/v2/leagues/{league_id}/market", headers=headers)
+        if market_res.status_code != 200:
+            st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
+            return None
 
-    players = market_res.json().get("players", [])
+    market_data = market_res.json()
+    players = market_data.get("i") or market_data.get("players") or []
     
     processed_players = []
     for p in players:
-        mv = p.get("marketValue", 0)
-        trend = p.get("marketValueTrend", 1)
+        mv = p.get("marketValue") or p.get("mv") or 0
+        trend = p.get("marketValueTrend") or p.get("mvt") or 1
+        name = p.get("lastName") or p.get("ln") or p.get("name") or "Unbekannt"
+        pos = p.get("position") or p.get("pos") or "-"
+
         pred_7d = mv + (trend * 7 * 100000)
         processed_players.append({
-            "Spieler": p.get("lastName", "Unbekannt"),
-            "Position": p.get("position", "-"),
+            "Spieler": name,
+            "Position": pos,
             "Aktueller MW": f"{mv:,.0f} €",
             "Prognose (7T)": f"{pred_7d:,.0f} €",
             "Gewinn/Verlust": f"{(pred_7d - mv):,.0f} €"
