@@ -44,33 +44,34 @@ def load_kickbase_data():
         return None
 
     leagues_data = leagues_res.json()
-    # In v4 liegt die Liste im Key 'i' oder 'leagues'
-    leagues = leagues_data.get("i") or leagues_data.get("leagues") or []
+    
+    # Ligen stecken in 'lins'
+    leagues = leagues_data.get("lins") or leagues_data.get("i") or leagues_data.get("leagues") or []
     
     if not leagues:
         st.error(f"Keine Liga gefunden. Server-Antwort: {leagues_data}")
         return None
 
     first_league = leagues[0]
-    league_id = first_league.get("id") or first_league.get("i")
+    league_id = first_league.get("i") or first_league.get("id")
 
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code != 200:
-        # Fallback auf v2, falls Transfermarkt-Endpunkt abweicht
+        # Fallback auf v2
         market_res = session.get(f"https://api.kickbase.com/v2/leagues/{league_id}/market", headers=headers)
         if market_res.status_code != 200:
             st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
             return None
 
     market_data = market_res.json()
-    players = market_data.get("i") or market_data.get("players") or []
+    players = market_data.get("i") or market_data.get("players") or market_data.get("p") or []
     
     processed_players = []
     for p in players:
-        mv = p.get("marketValue") or p.get("mv") or 0
-        trend = p.get("marketValueTrend") or p.get("mvt") or 1
-        name = p.get("lastName") or p.get("ln") or p.get("name") or "Unbekannt"
-        pos = p.get("position") or p.get("pos") or "-"
+        mv = p.get("mv") or p.get("marketValue") or 0
+        trend = p.get("mvt") or p.get("marketValueTrend") or 1
+        name = p.get("ln") or p.get("lastName") or p.get("n") or "Unbekannt"
+        pos = p.get("pos") or p.get("position") or "-"
 
         pred_7d = mv + (trend * 7 * 100000)
         processed_players.append({
