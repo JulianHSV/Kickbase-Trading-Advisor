@@ -15,7 +15,7 @@ def load_kickbase_data():
 
     if not email or not password:
         st.error("Bitte KB_EMAIL und KB_PASSWORD in den Streamlit Secrets eintragen.")
-        return None, None, None, None, None
+        return None, None, None
 
     session = requests.Session()
     login_url = "https://api.kickbase.com/v4/user/login"
@@ -29,68 +29,69 @@ def load_kickbase_data():
 
     if res.status_code != 200:
         st.error(f"Kickbase Login fehlgeschlagen! Status: {res.status_code}")
-        return None, None, None, None, None
+        return None, None, None
 
     token = res.json().get("tkn")
-    user_id = res.json().get("u", {}).get("i")
     headers["Authorization"] = f"Bearer {token}"
 
-    # Ligen laden
+    # 1. Liga-ID abrufen
     leagues_res = session.get("https://api.kickbase.com/v4/leagues", headers=headers)
     if leagues_res.status_code != 200:
         st.error("Fehler beim Laden der Ligen.")
-        return None, None, None, None, None
+        return None, None, None
 
     leagues = leagues_res.json().get("lins") or []
     if not leagues:
         st.error("Keine Liga gefunden.")
-        return None, None, None, None, None
+        return None, None, None
 
     league_id = leagues[0].get("i")
 
-    # 1. Transfermarkt
+    # 2. Transfermarkt laden
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     market_players = []
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 2. Eigenes Team (Mehrere Fallback-Pfade für v4)
+    # 3. Eigenen Kader über 'lineup' laden
+    lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
     my_players = []
-    me_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/me", headers=headers)
-    if me_res.status_code == 200:
-        me_data = me_res.json()
-        my_players = me_data.get("p") or me_data.get("squad") or me_data.get("it") or []
-    
-    if not my_players:
-        squad_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users/{user_id}/squad", headers=headers)
-        if squad_res.status_code == 200:
-            squad_data = squad_res.json()
-            my_players = squad_data.get("p") or squad_data.get("it") or squad_data.get("squad") or []
+    if lineup_res.status_code == 200:
+        lineup_data = lineup_res.json()
+        # Kombination aus Aufstellung (p) und Bank (b)
+        my_players = (lineup_data.get("p") or []) + (lineup_data.get("b") or [])
 
-    return market_players, my_players, session, headers, league_id
+    # 4. Alle Spieler der Liga (aus allen Teams) abrufen für die vollständige Suche
+    all_league_players = []
+    users_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users", headers=headers)
+    if users_res.status_code == 200:
+        users = users_res.json().get("users") or users_res.json().get("u") or []
+        for u in users:
+            uid = u.get("i")
+            if uid:
+                u_lineup = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users/{uid}/lineup", headers=headers)
+                if u_lineup.status_code == 200:
+                    ul_data = u_lineup.json()
+                    all_league_players.extend((ul_data.get("p") or []) + (ul_data.get("b") or []))
 
-def search_global_players(session, headers, query_str):
-    if not query_str or len(query_str) < 3:
-        return []
-    # Globaler Such-Endpunkt für alle Bundesliga-Spieler
-    search_url = f"https://api.kickbase.com/v4/competition/1/players?q={query_str}"
-    res = session.get(search_url, headers=headers)
-    if res.status_code == 200:
-        data = res.json()
-        return data.get("it") or data.get("p") or []
-    
-    # Fallback auf allgemeinen Such-Endpunkt
-    search_url_alt = f"https://api.kickbase.com/v4/players?q={query_str}"
-    res_alt = session.get(search_url_alt, headers=headers)
-    if res_alt.status_code == 200:
-        data = res_alt.json()
-        return data.get("it") or data.get("p") or []
+    # Kombiniere Markt, eigenen Kader und zugewiesene Spieler
+    all_combined = market_players + my_players + all_league_players
 
-    return []
+    return market_players, my_players, all_combined
 
 def process_player_list(players):
+    if not players:
+        return pd.DataFrame()
+
     data = []
+    seen_ids = set()
+
     for p in players:
+        pid = p.get("i")
+        if not pid or pid in seen_ids:
+            continue
+        seen_ids.add(pid)
+
         mv = p.get("mv", 0)
         mvt = p.get("mvt", 0)
         
@@ -107,7 +108,7 @@ def process_player_list(players):
         full_name = f"{fn} {ln}".strip()
 
         data.append({
-            "ID": p.get("i"),
+            "ID": pid,
             "Spieler": full_name,
             "Pos": POS_MAP.get(p.get("pos", 0), "-"),
             "Aktueller MW": mv,
@@ -128,48 +129,35 @@ def render_simple_chart(player_row):
     chart_df = pd.DataFrame({"Tag": labels, "Marktwert (€)": values}).set_index("Tag")
     st.line_chart(chart_df)
 
-market_raw, my_raw, session, headers, league_id = load_kickbase_data()
+market_raw, my_raw, all_raw = load_kickbase_data()
 
 if market_raw is not None:
     df_market = process_player_list(market_raw)
     df_my = process_player_list(my_raw)
+    df_all = process_player_list(all_raw)
 
     st.subheader("🔍 Spielersuche & Detail-Analyse")
     
-    search_input = st.text_input("Spielernamen eingeben (z. B. Kane, Musiala):", "")
+    if not df_all.empty:
+        search_options = [""] + sorted(df_all["Spieler"].unique().tolist())
+        selected_name = st.selectbox(
+            "Wähle einen Spieler aus der Liga / dem Transfermarkt:",
+            options=search_options,
+            format_func=lambda x: "Spieler suchen..." if x == "" else x
+        )
 
-    selected_player = None
+        if selected_name:
+            selected_player = df_all[df_all["Spieler"] == selected_name].iloc[0]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Aktueller MW", f"{selected_player['Aktueller MW']:,.0f} €".replace(",", "."))
+            col2.metric("Tagesveränderung", f"{selected_player['Tagesveränderung']:+,.0f} €".replace(",", "."))
+            col3.metric("Prognose (24h)", f"{selected_player['Prognose (24h)']:,.0f} €".replace(",", "."))
+            col4.metric("Gewinn / Verlust (7T)", f"{selected_player['Gewinn / Verlust (7T)']:+,.0f} €".replace(",", "."))
 
-    if search_input and len(search_input) >= 3:
-        search_results = search_global_players(session, headers, search_input)
-        if search_results:
-            df_search = process_player_list(search_results)
-            player_choice = st.selectbox("Gefundene Spieler:", options=df_search["Spieler"].tolist())
-            if player_choice:
-                selected_player = df_search[df_search["Spieler"] == player_choice].iloc[0]
-        else:
-            st.info("Kein Spieler in der gesamten Bundesliga gefunden.")
-    else:
-        all_loaded = pd.concat([df_market, df_my]).drop_duplicates(subset=['ID'])
-        if not all_loaded.empty:
-            player_choice = st.selectbox(
-                "Oder direkt aus Markt/Kader wählen:",
-                options=[""] + list(all_loaded["Spieler"].unique()),
-                format_func=lambda x: "Spieler auswählen..." if x == "" else x
-            )
-            if player_choice:
-                selected_player = all_loaded[all_loaded["Spieler"] == player_choice].iloc[0]
-
-    if selected_player is not None:
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Aktueller MW", f"{selected_player['Aktueller MW']:,.0f} €".replace(",", "."))
-        col2.metric("Tagesveränderung", f"{selected_player['Tagesveränderung']:+,.0f} €".replace(",", "."))
-        col3.metric("Prognose (24h)", f"{selected_player['Prognose (24h)']:,.0f} €".replace(",", "."))
-        col4.metric("Gewinn / Verlust (7T)", f"{selected_player['Gewinn / Verlust (7T)']:+,.0f} €".replace(",", "."))
-
-        st.caption("Marktwert-Verlauf (Vergangenheit & 7-Tage-Prognose)")
-        render_simple_chart(selected_player)
-        st.markdown("---")
+            st.caption("Marktwert-Verlauf (Vergangenheit & 7-Tage-Prognose)")
+            render_simple_chart(selected_player)
+            st.markdown("---")
 
     tab1, tab2 = st.tabs(["🛒 Transfermarkt", "🛡️ Mein Kader"])
 
