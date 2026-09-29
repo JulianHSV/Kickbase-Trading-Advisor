@@ -32,10 +32,9 @@ def load_kickbase_data():
         return None, None, None
 
     token = res.json().get("tkn")
-    user_id = res.json().get("u", {}).get("i")
     headers["Authorization"] = f"Bearer {token}"
 
-    # 1. Liga-ID abrufen
+    # 1. Liga-ID
     leagues_res = session.get("https://api.kickbase.com/v4/leagues", headers=headers)
     if leagues_res.status_code != 200:
         st.error("Fehler beim Laden der Ligen.")
@@ -48,38 +47,33 @@ def load_kickbase_data():
 
     league_id = leagues[0].get("i")
 
-    # 2. Transfermarkt laden
+    # 2. Transfermarkt
     market_players = []
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 3. Eigenen Kader laden (v4 Squad / Lineup Endpunkte)
+    # 3. Eigener Kader
     my_players = []
-    squad_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/squad", headers=headers)
-    if squad_res.status_code == 200:
-        s_data = squad_res.json()
-        my_players = s_data.get("it") or s_data.get("p") or s_data.get("squad") or []
-    
-    if not my_players:
-        lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
-        if lineup_res.status_code == 200:
-            l_data = lineup_res.json()
-            my_players = (l_data.get("p") or []) + (l_data.get("b") or [])
+    lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
+    if lineup_res.status_code == 200:
+        l_data = lineup_res.json()
+        my_players = (l_data.get("p") or []) + (l_data.get("b") or [])
 
-    # 4. Globale Datenbank: ALLE Bundesliga-Spieler laden (1. Bundesliga Competition ID = 1)
-    all_global_players = []
-    comp_res = session.get("https://api.kickbase.com/v4/competitions/1/players", headers=headers)
-    if comp_res.status_code == 200:
-        all_global_players = comp_res.json().get("it") or comp_res.json().get("p") or []
-    else:
-        # Alternative Abfrage für die gesamte Bundesliga-Datenbank
-        comp_res_alt = session.get("https://api.kickbase.com/v4/competitions/1/marketvaluechange", headers=headers)
-        if comp_res_alt.status_code == 200:
-            all_global_players = comp_res_alt.json().get("it") or comp_res_alt.json().get("p") or []
+    # 4. GESAMTE BUNDESLIGA LADEN (über alle 18 Teams)
+    all_bundesliga_players = []
+    teams_res = session.get("https://api.kickbase.com/v4/competitions/1/teams", headers=headers)
+    if teams_res.status_code == 200:
+        teams = teams_res.json().get("t") or teams_res.json().get("it") or []
+        for t in teams:
+            team_id = t.get("i")
+            if team_id:
+                t_res = session.get(f"https://api.kickbase.com/v4/competitions/1/teams/{team_id}/players", headers=headers)
+                if t_res.status_code == 200:
+                    players_in_team = t_res.json().get("p") or t_res.json().get("it") or []
+                    all_bundesliga_players.extend(players_in_team)
 
-    # Zusammenführen aller Listen für die vollständige Suche
-    combined_raw = market_players + my_players + all_global_players
+    combined_raw = market_players + my_players + all_bundesliga_players
 
     return market_players, my_players, combined_raw
 
@@ -133,6 +127,14 @@ def render_simple_chart(player_row):
     chart_df = pd.DataFrame({"Tag": labels, "Marktwert (€)": values}).set_index("Tag")
     st.line_chart(chart_df)
 
+# Funktion für abwechselnde Zeilenfarben (Zebra-Muster)
+def style_zebra(df):
+    def zebra_bg(row):
+        bg = 'background-color: #1e2530;' if row.name % 2 == 0 else 'background-color: #12171e;'
+        return [bg] * len(row)
+    
+    return df.style.apply(zebra_bg, axis=1)
+
 market_raw, my_raw, all_raw = load_kickbase_data()
 
 if market_raw is not None:
@@ -170,7 +172,10 @@ if market_raw is not None:
             display_df = df_market.drop(columns=["ID", "Tagesveränderung"]).copy()
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 display_df[col] = display_df[col].map("{:,.0f} €".format).str.replace(",", ".")
-            st.dataframe(display_df, use_container_width=True)
+            
+            # Tabelle mit Zebra-Styling rendern
+            styled_df = style_zebra(display_df)
+            st.dataframe(styled_df, use_container_width=True)
         else:
             st.info("Keine Spieler auf dem Transfermarkt.")
 
@@ -179,6 +184,9 @@ if market_raw is not None:
             display_my = df_my.drop(columns=["ID", "Tagesveränderung"]).copy()
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 display_my[col] = display_my[col].map("{:,.0f} €".format).str.replace(",", ".")
-            st.dataframe(display_my, use_container_width=True)
+            
+            # Tabelle mit Zebra-Styling rendern
+            styled_my = style_zebra(display_my)
+            st.dataframe(styled_my, use_container_width=True)
         else:
             st.info("Keine Spieler im Kader gefunden.")
