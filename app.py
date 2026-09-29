@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Kickbase Analyst & Prognose", layout="wide")
 
@@ -33,7 +34,6 @@ def get_kickbase_session():
     token = res.json().get("tkn")
     headers["Authorization"] = f"Bearer {token}"
 
-    # Liga-ID holen
     leagues_res = session.get("https://api.kickbase.com/v4/leagues", headers=headers)
     if leagues_res.status_code != 200:
         st.error("Fehler beim Laden der Ligen.")
@@ -47,19 +47,31 @@ def get_kickbase_session():
     league_id = leagues[0].get("i")
     return session, headers, league_id
 
+def search_kickbase_api(session, headers, league_id, query):
+    if not query or len(query) < 2:
+        return []
+    
+    # Echte globale Kickbase-Suchanfrage
+    search_url = f"https://api.kickbase.com/v4/leagues/{league_id}/players?q={query}"
+    res = session.get(search_url, headers=headers)
+    if res.status_code == 200:
+        return res.json().get("it") or res.json().get("p") or []
+
+    return []
+
 @st.cache_data(ttl=900)
-def load_all_data():
+def load_league_data():
     session, headers, league_id = get_kickbase_session()
     if not session:
-        return [], [], []
+        return [], [], None, None, None
 
-    # 1. Transfermarkt
+    # Transfermarkt
     market_players = []
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 2. Eigener Kader (Fix: /lineup & /squad abfragen)
+    # Kader
     my_players = []
     lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
     if lineup_res.status_code == 200:
@@ -71,20 +83,38 @@ def load_all_data():
         if squad_res.status_code == 200:
             my_players = squad_res.json().get("it") or squad_res.json().get("p") or []
 
-    # 3. Alle Bundesliga-Spieler laden (über Wettbewerbs-Teams)
-    all_buli_players = []
-    teams_res = session.get("https://api.kickbase.com/v4/competitions/1/teams", headers=headers)
-    if teams_res.status_code == 200:
-        teams = teams_res.json().get("t") or teams_res.json().get("it") or []
-        for t in teams:
-            team_id = t.get("i")
-            if team_id:
-                t_res = session.get(f"https://api.kickbase.com/v4/competitions/1/teams/{team_id}/players", headers=headers)
-                if t_res.status_code == 200:
-                    p_list = t_res.json().get("p") or t_res.json().get("it") or []
-                    all_buli_players.extend(p_list)
+    return market_players, my_players
 
-    return market_players, my_players, all_buli_players
+def process_player(p):
+    pid = p.get("i")
+    mv = p.get("mv", 0)
+    mvt = p.get("mvt", 0)
+    
+    daily_change = p.get("mvch") or 0
+    if daily_change == 0:
+        daily_change = (mv * 0.0075) if mvt == 1 else -(mv * 0.0075) if mvt == 2 else 0
+
+    pred_24h = mv + daily_change
+    pred_7d = mv + (daily_change * 7)
+    diff_7d = pred_7d - mv
+
+    fn = p.get("fn", "")
+    ln = p.get("n", "Unbekannt")
+    full_name = f"{fn} {ln}".strip()
+
+    image_url = f"https://kickbase.cdn.ity.io/players/{pid}/image" if pid else None
+
+    return {
+        "ID": pid,
+        "Spieler": full_name,
+        "Pos": POS_MAP.get(p.get("pos", 0), "-"),
+        "Aktueller MW": mv,
+        "Prognose (24h)": pred_24h,
+        "Prognose (7T)": pred_7d,
+        "Gewinn / Verlust (7T)": diff_7d,
+        "Tagesveränderung": daily_change,
+        "Image": image_url
+    }
 
 def process_player_list(players):
     if not players:
@@ -94,47 +124,54 @@ def process_player_list(players):
     seen_ids = set()
 
     for p in players:
-        pid = p.get("i")
-        if not pid or pid in seen_ids:
-            continue
-        seen_ids.add(pid)
+        p_data = process_player(p)
+        if p_data["ID"] and p_data["ID"] not in seen_ids:
+            seen_ids.add(p_data["ID"])
+            data.append(p_data)
 
-        mv = p.get("mv", 0)
-        mvt = p.get("mvt", 0)
-        
-        daily_change = p.get("mvch") or 0
-        if daily_change == 0:
-            daily_change = (mv * 0.0075) if mvt == 1 else -(mv * 0.0075) if mvt == 2 else 0
-
-        pred_24h = mv + daily_change
-        pred_7d = mv + (daily_change * 7)
-        diff_7d = pred_7d - mv
-
-        fn = p.get("fn", "")
-        ln = p.get("n", "Unbekannt")
-        full_name = f"{fn} {ln}".strip()
-
-        data.append({
-            "ID": pid,
-            "Spieler": full_name,
-            "Pos": POS_MAP.get(p.get("pos", 0), "-"),
-            "Aktueller MW": mv,
-            "Prognose (24h)": pred_24h,
-            "Prognose (7T)": pred_7d,
-            "Gewinn / Verlust (7T)": diff_7d,
-            "Tagesveränderung": daily_change
-        })
     return pd.DataFrame(data)
 
-def render_simple_chart(player_row):
-    mv = player_row["Aktueller MW"]
-    daily_change = player_row["Tagesveränderung"]
+def render_advanced_chart(player_dict):
+    mv = player_dict["Aktueller MW"]
+    daily_change = player_dict["Tagesveränderung"]
 
-    labels = [f"-{i}T" for i in range(7, 0, -1)] + ["Heute"] + [f"+{i}T" for i in range(1, 8)]
-    values = [mv - (daily_change * i) for i in range(7, 0, -1)] + [mv] + [mv + (daily_change * i) for i in range(1, 8)]
+    # Generiere Punkte für die letzten 7 Tage, Heute, und die nächsten 7 Tage
+    past_days = [f"-{i}T" for i in range(7, 0, -1)]
+    future_days = [f"+{i}T" for i in range(1, 8)]
+    
+    past_values = [mv - (daily_change * i) for i in range(7, 0, -1)]
+    future_values = [mv + (daily_change * i) for i in range(1, 8)]
 
-    chart_df = pd.DataFrame({"Tag": labels, "Marktwert (€)": values}).set_index("Tag")
-    st.line_chart(chart_df)
+    fig = go.Figure()
+
+    # Historischer Verlauf + Heute
+    fig.add_trace(go.Scatter(
+        x=past_days + ["Heute"],
+        y=past_values + [mv],
+        mode='lines+markers',
+        name='Vergangenheit',
+        line=dict(color='#00CC96', width=3)
+    ))
+
+    # Prognose (24h bis 7 Tage)
+    fig.add_trace(go.Scatter(
+        x=["Heute"] + future_days,
+        y=[mv] + future_values,
+        mode='lines+markers',
+        name='Prognose (7 Tage)',
+        line=dict(color='#AB63FA', width=3, dash='dash')
+    ))
+
+    fig.update_layout(
+        title=f"Marktwertverlauf & Prognose für {player_dict['Spieler']}",
+        xaxis_title="Zeitraum",
+        yaxis_title="Marktwert (€)",
+        template="plotly_dark",
+        margin=dict(l=20, r=20, t=40, b=20),
+        height=380
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 def style_zebra(df):
     def zebra_bg(row):
@@ -142,50 +179,64 @@ def style_zebra(df):
         return [bg] * len(row)
     return df.style.apply(zebra_bg, axis=1)
 
-market_raw, my_raw, buli_raw = load_all_data()
+# Hauptlogik
+session, headers, league_id = get_kickbase_session()
 
-if market_raw is not None:
+if session:
+    market_raw, my_raw = load_league_data()
     df_market = process_player_list(market_raw)
     df_my = process_player_list(my_raw)
+
+    st.subheader("🔍 Echte Kickbase-Spielersuche")
     
-    # Kombination aller Quellen für die Suche
-    raw_all = market_raw + my_raw + buli_raw
-    df_all = process_player_list(raw_all)
+    # Freitextsuche ohne Voreinstellung
+    search_query = st.text_input("Gibe hier den Spielernamen ein:", placeholder="Tippe z. B. Kane, Musiala, Wirtz...")
 
-    st.subheader("🔍 Spielersuche & Detail-Analyse")
-    
-    search_query = st.text_input("Spielernamen eingeben (direkt tippen):", placeholder="z. B. Kane, Musiala, Wirtz...")
+    selected_player_dict = None
 
-    selected_player = None
-
-    if search_query.strip() and not df_all.empty:
-        matches = df_all[df_all["Spieler"].str.contains(search_query.strip(), case=False, na=False)]
+    if search_query.strip():
+        search_results = search_kickbase_api(session, headers, league_id, search_query.strip())
         
-        if not matches.empty:
-            if len(matches) == 1:
-                selected_player = matches.iloc[0]
-            else:
-                chosen_name = st.selectbox("Treffer auswählen:", options=matches["Spieler"].tolist())
-                selected_player = matches[matches["Spieler"] == chosen_name].iloc[0]
+        if search_results:
+            options_map = {}
+            for p in search_results:
+                p_processed = process_player(p)
+                label = f"{p_processed['Spieler']} ({p_processed['Pos']} - {p_processed['Aktueller MW']:,.0f} €)".replace(",", ".")
+                options_map[label] = p_processed
+
+            chosen_label = st.selectbox("Gefundene Spieler (wähle einen aus):", options=list(options_map.keys()))
+            if chosen_label:
+                selected_player_dict = options_map[chosen_label]
         else:
-            st.warning(f"Kein Spieler mit '{search_query}' gefunden.")
+            st.warning(f"Kein Spieler mit '{search_query}' in der gesamten Kickbase-Datenbank gefunden.")
 
-    if selected_player is not None:
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Aktueller MW", f"{selected_player['Aktueller MW']:,.0f} €".replace(",", "."))
-        col2.metric("Tagesveränderung", f"{selected_player['Tagesveränderung']:+,.0f} €".replace(",", "."))
-        col3.metric("Prognose (24h)", f"{selected_player['Prognose (24h)']:,.0f} €".replace(",", "."))
-        col4.metric("Gewinn / Verlust (7T)", f"{selected_player['Gewinn / Verlust (7T)']:+,.0f} €".replace(",", "."))
+    # Profilansicht anzeigen, wenn ein Spieler ausgewählt wurde
+    if selected_player_dict:
+        st.markdown("---")
+        col_img, col_info = st.columns([1, 4])
+        
+        with col_img:
+            if selected_player_dict["Image"]:
+                st.image(selected_player_dict["Image"], width=130)
+        
+        with col_info:
+            st.markdown(f"### {selected_player_dict['Spieler']} (`{selected_player_dict['Pos']}`)")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Aktueller MW", f"{selected_player_dict['Aktueller MW']:,.0f} €".replace(",", "."))
+            c2.metric("Tagesveränderung", f"{selected_player_dict['Tagesveränderung']:+,.0f} €".replace(",", "."))
+            c3.metric("Prognose (24h)", f"{selected_player_dict['Prognose (24h)']:,.0f} €".replace(",", "."))
+            c4.metric("Gewinn / Verlust (7T)", f"{selected_player_dict['Gewinn / Verlust (7T)']:+,.0f} €".replace(",", "."))
 
-        st.caption("Marktwert-Verlauf (Vergangenheit & 7-Tage-Prognose)")
-        render_simple_chart(selected_player)
+        # Interaktiver Plotly-Graph
+        render_advanced_chart(selected_player_dict)
         st.markdown("---")
 
+    # Tabs für Markt & Kader
     tab1, tab2 = st.tabs(["🛒 Transfermarkt", "🛡️ Mein Kader"])
 
     with tab1:
         if not df_market.empty:
-            display_df = df_market.drop(columns=["ID", "Tagesveränderung"]).copy()
+            display_df = df_market.drop(columns=["ID", "Tagesveränderung", "Image"]).copy()
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 display_df[col] = display_df[col].map("{:,.0f} €".format).str.replace(",", ".")
             st.dataframe(style_zebra(display_df), use_container_width=True)
@@ -194,7 +245,7 @@ if market_raw is not None:
 
     with tab2:
         if not df_my.empty:
-            display_my = df_my.drop(columns=["ID", "Tagesveränderung"]).copy()
+            display_my = df_my.drop(columns=["ID", "Tagesveränderung", "Image"]).copy()
             for col in ["Aktueller MW", "Prognose (24h)", "Prognose (7T)", "Gewinn / Verlust (7T)"]:
                 display_my[col] = display_my[col].map("{:,.0f} €".format).str.replace(",", ".")
             st.dataframe(style_zebra(display_my), use_container_width=True)
