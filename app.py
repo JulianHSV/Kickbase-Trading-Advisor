@@ -8,14 +8,13 @@ st.title("⚽ Kickbase Analyst & 7-Tage-Prognose")
 
 POS_MAP = {1: "TW", 2: "ABW", 3: "MF", 4: "ST"}
 
-@st.cache_data(ttl=1800)
-def load_kickbase_data():
+def get_kickbase_session():
     email = st.secrets.get("KB_EMAIL")
     password = st.secrets.get("KB_PASSWORD")
 
     if not email or not password:
         st.error("Bitte KB_EMAIL und KB_PASSWORD in den Streamlit Secrets eintragen.")
-        return None, None, None, None, None
+        return None, None, None
 
     session = requests.Session()
     login_url = "https://api.kickbase.com/v4/user/login"
@@ -29,58 +28,63 @@ def load_kickbase_data():
 
     if res.status_code != 200:
         st.error(f"Kickbase Login fehlgeschlagen! Status: {res.status_code}")
-        return None, None, None, None, None
+        return None, None, None
 
     token = res.json().get("tkn")
     headers["Authorization"] = f"Bearer {token}"
 
-    # 1. Liga-ID abrufen
+    # Liga-ID holen
     leagues_res = session.get("https://api.kickbase.com/v4/leagues", headers=headers)
     if leagues_res.status_code != 200:
         st.error("Fehler beim Laden der Ligen.")
-        return None, None, None, None, None
+        return None, None, None
 
     leagues = leagues_res.json().get("lins") or []
     if not leagues:
         st.error("Keine Liga gefunden.")
-        return None, None, None, None, None
+        return None, None, None
 
     league_id = leagues[0].get("i")
+    return session, headers, league_id
 
-    # 2. Transfermarkt laden
+@st.cache_data(ttl=900)
+def load_all_data():
+    session, headers, league_id = get_kickbase_session()
+    if not session:
+        return [], [], []
+
+    # 1. Transfermarkt
     market_players = []
     market_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/market", headers=headers)
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 3. Eigenen Kader laden
+    # 2. Eigener Kader (Fix: /lineup & /squad abfragen)
     my_players = []
     lineup_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/lineup", headers=headers)
     if lineup_res.status_code == 200:
         l_data = lineup_res.json()
         my_players = (l_data.get("p") or []) + (l_data.get("b") or [])
 
-    return market_players, my_players, session, headers, league_id
+    if not my_players:
+        squad_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/squad", headers=headers)
+        if squad_res.status_code == 200:
+            my_players = squad_res.json().get("it") or squad_res.json().get("p") or []
 
-def search_kickbase_global(session, headers, league_id, query):
-    if not query or len(query) < 2:
-        return []
-    
-    # 1. Versuche ligaweite / globale Spielersuche
-    search_url = f"https://api.kickbase.com/v4/leagues/{league_id}/players?q={query}"
-    res = session.get(search_url, headers=headers)
-    if res.status_code == 200:
-        players = res.json().get("it") or res.json().get("p") or []
-        if players:
-            return players
+    # 3. Alle Bundesliga-Spieler laden (über Wettbewerbs-Teams)
+    all_buli_players = []
+    teams_res = session.get("https://api.kickbase.com/v4/competitions/1/teams", headers=headers)
+    if teams_res.status_code == 200:
+        teams = teams_res.json().get("t") or teams_res.json().get("it") or []
+        for t in teams:
+            team_id = t.get("i")
+            if team_id:
+                t_res = session.get(f"https://api.kickbase.com/v4/competitions/1/teams/{team_id}/players", headers=headers)
+                if t_res.status_code == 200:
+                    p_list = t_res.json().get("p") or t_res.json().get("it") or []
+                    all_buli_players.extend(p_list)
 
-    # 2. Fallback auf Wettbewerbs-Suchpfad
-    search_url_alt = f"https://api.kickbase.com/v4/competitions/1/players?q={query}"
-    res_alt = session.get(search_url_alt, headers=headers)
-    if res_alt.status_code == 200:
-        return res_alt.json().get("it") or res_alt.json().get("p") or []
-
-    return []
+    return market_players, my_players, all_buli_players
 
 def process_player_list(players):
     if not players:
@@ -138,39 +142,33 @@ def style_zebra(df):
         return [bg] * len(row)
     return df.style.apply(zebra_bg, axis=1)
 
-market_raw, my_raw, session, headers, league_id = load_kickbase_data()
+market_raw, my_raw, buli_raw = load_all_data()
 
 if market_raw is not None:
     df_market = process_player_list(market_raw)
     df_my = process_player_list(my_raw)
+    
+    # Kombination aller Quellen für die Suche
+    raw_all = market_raw + my_raw + buli_raw
+    df_all = process_player_list(raw_all)
 
     st.subheader("🔍 Spielersuche & Detail-Analyse")
     
-    # Leeres Textfeld ohne Vorausfüllung
-    search_query = st.text_input("Spielernamen eingeben:", placeholder="z. B. Kane, Musiala, Tah...")
+    search_query = st.text_input("Spielernamen eingeben (direkt tippen):", placeholder="z. B. Kane, Musiala, Wirtz...")
 
     selected_player = None
 
-    if search_query.strip():
-        # Live-Abfrage der Kickbase API für den eingegebenen Namen
-        raw_search_results = search_kickbase_global(session, headers, league_id, search_query.strip())
-        df_search = process_player_list(raw_search_results)
-
-        if not df_search.empty:
-            if len(df_search) == 1:
-                selected_player = df_search.iloc[0]
+    if search_query.strip() and not df_all.empty:
+        matches = df_all[df_all["Spieler"].str.contains(search_query.strip(), case=False, na=False)]
+        
+        if not matches.empty:
+            if len(matches) == 1:
+                selected_player = matches.iloc[0]
             else:
-                chosen_name = st.selectbox("Treffer auswählen:", options=df_search["Spieler"].tolist())
-                selected_player = df_search[df_search["Spieler"] == chosen_name].iloc[0]
+                chosen_name = st.selectbox("Treffer auswählen:", options=matches["Spieler"].tolist())
+                selected_player = matches[matches["Spieler"] == chosen_name].iloc[0]
         else:
-            st.warning(f"Kein Spieler mit '{search_query}' in Kickbase gefunden.")
-    else:
-        # Wenn Suchfeld leer ist, zeige Schnellauswahl aus Markt + Kader
-        all_local = pd.concat([df_market, df_my]).drop_duplicates(subset=['ID'])
-        if not all_local.empty:
-            chosen_local = st.selectbox("Oder aus Markt/Kader wählen:", options=[""] + sorted(all_local["Spieler"].tolist()))
-            if chosen_local:
-                selected_player = all_local[all_local["Spieler"] == chosen_local].iloc[0]
+            st.warning(f"Kein Spieler mit '{search_query}' gefunden.")
 
     if selected_player is not None:
         col1, col2, col3, col4 = st.columns(4)
