@@ -32,7 +32,6 @@ def load_kickbase_data():
         return None, None, None
 
     token = res.json().get("tkn")
-    user_id = res.json().get("u", {}).get("i")
     headers["Authorization"] = f"Bearer {token}"
 
     # Ligen laden
@@ -54,13 +53,24 @@ def load_kickbase_data():
     if market_res.status_code == 200:
         market_players = market_res.json().get("it") or []
 
-    # 2. Eigenes Team
-    team_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/users/{user_id}/squad", headers=headers)
+    # 2. Eigenes Team / Kader (v4 nutzt oft den 'me'-Endpunkt)
+    me_res = session.get(f"https://api.kickbase.com/v4/leagues/{league_id}/me", headers=headers)
     my_players = []
-    if team_res.status_code == 200:
-        my_players = team_res.json().get("it") or team_res.json().get("p") or []
+    if me_res.status_code == 200:
+        me_data = me_res.json()
+        my_players = me_data.get("p") or me_data.get("it") or []
 
-    return market_players, my_players, headers
+    return market_players, my_players, session, headers, league_id
+
+def search_player_by_name(session, headers, league_id, query_str):
+    if not query_str or len(query_str) < 3:
+        return []
+    # Kickbase Such-Endpunkt
+    search_url = f"https://api.kickbase.com/v4/leagues/{league_id}/players?q={query_str}"
+    res = session.get(search_url, headers=headers)
+    if res.status_code == 200:
+        return res.json().get("it") or res.json().get("p") or []
+    return []
 
 def process_player_list(players):
     data = []
@@ -96,31 +106,47 @@ def render_simple_chart(player_row):
     mv = player_row["Aktueller MW"]
     daily_change = player_row["Tagesveränderung"]
 
-    # Datenpunkte generieren (-7 Tage bis +7 Tage)
     labels = [f"-{i}T" for i in range(7, 0, -1)] + ["Heute"] + [f"+{i}T" for i in range(1, 8)]
     values = [mv - (daily_change * i) for i in range(7, 0, -1)] + [mv] + [mv + (daily_change * i) for i in range(1, 8)]
 
     chart_df = pd.DataFrame({"Tag": labels, "Marktwert (€)": values}).set_index("Tag")
     st.line_chart(chart_df)
 
-market_raw, my_raw, headers = load_kickbase_data()
+market_raw, my_raw, session, headers, league_id = load_kickbase_data()
 
 if market_raw is not None:
     df_market = process_player_list(market_raw)
     df_my = process_player_list(my_raw)
 
-    all_players_df = pd.concat([df_market, df_my]).drop_duplicates(subset=['ID'])
-
     st.subheader("🔍 Spielersuche & Detail-Analyse")
-    search_query = st.selectbox(
-        "Spieler auswählen:",
-        options=[""] + list(all_players_df["Spieler"].unique()),
-        format_func=lambda x: "Spieler suchen..." if x == "" else x
-    )
+    
+    # Text-Eingabe für freie Suche aller Spieler
+    search_input = st.text_input("Spielernamen eingeben (mind. 3 Buchstaben):", "")
 
-    if search_query:
-        selected_player = all_players_df[all_players_df["Spieler"] == search_query].iloc[0]
-        
+    selected_player = None
+
+    if search_input and len(search_input) >= 3:
+        search_results = search_player_by_name(session, headers, league_id, search_input)
+        if search_results:
+            df_search = process_player_list(search_results)
+            player_choice = st.selectbox("Gefundene Spieler:", options=df_search["Spieler"].tolist())
+            if player_choice:
+                selected_player = df_search[df_search["Spieler"] == player_choice].iloc[0]
+        else:
+            st.info("Kein Spieler mit diesem Namen gefunden.")
+    else:
+        # Fallback auf geladene Markt- und Kaderspieler
+        all_loaded = pd.concat([df_market, df_my]).drop_duplicates(subset=['ID'])
+        if not all_loaded.empty:
+            player_choice = st.selectbox(
+                "Oder direkt aus Markt/Kader wählen:",
+                options=[""] + list(all_loaded["Spieler"].unique()),
+                format_func=lambda x: "Spieler auswählen..." if x == "" else x
+            )
+            if player_choice:
+                selected_player = all_loaded[all_loaded["Spieler"] == player_choice].iloc[0]
+
+    if selected_player is not None:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Aktueller MW", f"{selected_player['Aktueller MW']:,.0f} €".replace(",", "."))
         col2.metric("Tagesveränderung", f"{selected_player['Tagesveränderung']:+,.0f} €".replace(",", "."))
