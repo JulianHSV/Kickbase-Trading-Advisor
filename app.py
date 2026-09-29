@@ -16,9 +16,18 @@ def load_kickbase_data():
         return None
 
     session = requests.Session()
-    login_url = "https://api.kickbase.com/v2/user/login"
-    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
-    login_payload = {"email": email, "password": password}
+    login_url = "https://api.kickbase.com/v4/user/login"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+        "Content-Type": "application/json"
+    }
+    
+    login_payload = {
+        "em": email,
+        "pass": password,
+        "loy": False,
+        "rep": {}
+    }
 
     res = session.post(login_url, json=login_payload, headers=headers)
 
@@ -26,12 +35,12 @@ def load_kickbase_data():
         st.error(f"Kickbase Login fehlgeschlagen! Status: {res.status_code} - Antwort: {res.text}")
         return None
 
-    token = res.json().get("token")
+    token = res.json().get("tkn")
     headers["Authorization"] = f"Bearer {token}"
 
     leagues_res = session.get("https://api.kickbase.com/v2/leagues", headers=headers)
     if leagues_res.status_code != 200:
-        st.error("Fehler beim Laden der Ligen.")
+        st.error(f"Fehler beim Laden der Ligen. Status: {leagues_res.status_code}")
         return None
 
     leagues = leagues_res.json().get("leagues", [])
@@ -43,7 +52,7 @@ def load_kickbase_data():
 
     market_res = session.get(f"https://api.kickbase.com/v2/leagues/{league_id}/market", headers=headers)
     if market_res.status_code != 200:
-        st.error("Fehler beim Laden des Transfermarkts.")
+        st.error(f"Fehler beim Laden des Transfermarkts. Status: {market_res.status_code}")
         return None
 
     players = market_res.json().get("players", [])
@@ -52,7 +61,6 @@ def load_kickbase_data():
     for p in players:
         mv = p.get("marketValue", 0)
         trend = p.get("marketValueTrend", 1)
-        # Einfache Tendenz-Berechnung für 7 Tage
         pred_7d = mv + (trend * 7 * 100000)
         processed_players.append({
             "Spieler": p.get("lastName", "Unbekannt"),
