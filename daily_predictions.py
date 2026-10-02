@@ -2,13 +2,18 @@ import os
 import time
 import requests
 import pandas as pd
+from dotenv import load_dotenv
 
-# Konfiguration aus GitHub Secrets
-KB_EMAIL = os.environ.get("KB_EMAIL")
-KB_PASSWORD = os.environ.get("KB_PASSWORD")
+# Lade lokale .env Datei, falls vorhanden (für lokale Testläufe)
+load_dotenv()
+
+# Anmeldedaten aus Umgebungsvariablen / Secrets auslesen
+KB_EMAIL = os.getenv("KB_EMAIL")
+KB_PASSWORD = os.getenv("KB_PASSWORD")
+
 API_BASE_URL = "https://api.kickbase.com"
 
-# Standard-Header inkl. User-Agent gegen Bot-Blocking
+# Standard-Header inkl. Browser User-Agent gegen Cloudflare-/Bot-Blocking
 BASE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
@@ -23,7 +28,7 @@ def fetch_with_retry(url, headers, max_retries=3, delay=1.0):
             if response.status_code == 200:
                 return response
             elif response.status_code == 429:
-                # Too Many Requests -> Längere Pause
+                # Rate Limit erreicht -> Gestaffelte Pause
                 time.sleep(2.0 * (attempt + 1))
         except (requests.exceptions.SSLError, requests.exceptions.RequestException) as e:
             if attempt == max_retries - 1:
@@ -32,7 +37,7 @@ def fetch_with_retry(url, headers, max_retries=3, delay=1.0):
     return None
 
 def login():
-    """Authentifizierung an der v4 API"""
+    """Authentifizierung an der Kickbase v4 API"""
     login_url = f"{API_BASE_URL}/v4/user/login"
     payload = {
         "email": KB_EMAIL,
@@ -55,24 +60,25 @@ def main():
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
-    # 1. Spielerliste abrufen (Beispiel für v4 Endpoint)
-    print("Hole Spielerdaten...")
-    players_url = f"{API_BASE_URL}/v4/market"  # Oder entsprechender v4 Endpoint
-    res = fetch_with_retry(players_url, headers)
+    # 1. Transfermarkt / Spielerdaten abrufen
+    print("Hole Marktdaten...")
+    market_url = f"{API_BASE_URL}/v4/market"
+    res = fetch_with_retry(market_url, headers)
     
     if not res:
         print("Fehler beim Abrufen der Marktdaten.")
         return
 
-    players_data = res.json().get("players", [])
+    market_data = res.json()
+    players_data = market_data.get("players", [])
     print(f"{len(players_data)} Spieler gefunden.")
 
     predictions = []
 
-    # 2. Schleife für Performance-Daten mit Delay zur Entlastung der API
+    # 2. Schleife für Performance-Daten mit Rate-Limiting-Bremse
     for idx, player in enumerate(players_data):
         player_id = player.get("id")
-        name = player.get("lastName", "Unbekannt")
+        name = player.get("lastName", player.get("firstName", "Unbekannt"))
         
         # Performance-URL
         perf_url = f"{API_BASE_URL}/v4/competitions/1/players/{player_id}/performance"
@@ -81,7 +87,6 @@ def main():
             perf_res = fetch_with_retry(perf_url, headers)
             if perf_res:
                 perf_data = perf_res.json()
-                # Hier deine Vorhersage-Berechnung / Extraktion
                 predictions.append({
                     "id": player_id,
                     "name": name,
@@ -91,15 +96,15 @@ def main():
         except Exception as e:
             print(f"Fehler bei Spieler {name} ({player_id}): {e}")
 
-        # Rate-Limiting Bremse (200ms Pause zwischen Anfragen)
+        # Wichtig: 200ms Pause zwischen den Anfragen verhindert den SSL Connection Reset
         time.sleep(0.2)
 
-        if (idx + 1) % 50 == 0:
+        if (idx + 1) % 25 == 0:
             print(f"{idx + 1}/{len(players_data)} Spieler verarbeitet...")
 
     print(f"Fertig! {len(predictions)} Vorhersagen generiert.")
 
-    # Ergebnisse speichern (z.B. als CSV oder JSON)
+    # Ergebnisse speichern
     df = pd.DataFrame(predictions)
     df.to_csv("predictions.csv", index=False)
     print("Ergebnisse in predictions.csv gespeichert.")
