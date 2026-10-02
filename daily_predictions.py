@@ -1,110 +1,108 @@
-from features.predictions.predictions import live_data_predictions, join_current_market, join_current_squad
-from features.predictions.preprocessing import preprocess_player_data, split_data
-from features.predictions.modeling import train_model, evaluate_model
-from kickbase_api.league import get_league_id
-from kickbase_api.user import login
-from features.notifier import send_mail
-from features.predictions.data_handler import (
-    create_player_data_table,
-    check_if_data_reload_needed,
-    save_player_data_to_db,
-    load_player_data_from_db,
-)
-from features.budgets import calc_manager_budgets
-from IPython.display import display
-from dotenv import load_dotenv
-import os, pandas as pd
+import os
+import time
+import requests
+import pandas as pd
 
-# Load environment variables from .env file
-load_dotenv() 
+# Konfiguration aus GitHub Secrets
+KB_EMAIL = os.environ.get("KB_EMAIL")
+KB_PASSWORD = os.environ.get("KB_PASSWORD")
+API_BASE_URL = "https://api.kickbase.com"
 
-# ----------------- Notes & TODOs -----------------
+# Standard-Header inkl. User-Agent gegen Bot-Blocking
+BASE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
 
-# TODO Fix the UTC timezone problems in the github actions scheduling
-# TODO Add prediction of 3, 7 days, to give more context
-# TODO Based upon the overpay of the other users, calculate a max price to pay for a player
-# TODO Add features like starting 11 probability, injuries, ...
-# TODO Improve budget calculation, weird bug that for me the budgets is 513929 off, idk why, checked everything
+def fetch_with_retry(url, headers, max_retries=3, delay=1.0):
+    """Führt einen GET-Request mit Retry-Logik bei Netzwerkausfällen/SSL-Fehlern aus."""
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 429:
+                # Too Many Requests -> Längere Pause
+                time.sleep(2.0 * (attempt + 1))
+        except (requests.exceptions.SSLError, requests.exceptions.RequestException) as e:
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(delay * (attempt + 1))
+    return None
 
-# ----------------- SYSTEM PARAMETERS -----------------
-# Should be left unchanged unless you know what you're doing
+def login():
+    """Authentifizierung an der v4 API"""
+    login_url = f"{API_BASE_URL}/v4/user/login"
+    payload = {
+        "email": KB_EMAIL,
+        "password": KB_PASSWORD
+    }
+    
+    response = requests.post(login_url, json=payload, headers=BASE_HEADERS, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    return data.get("token")
 
-last_mv_values = 365    # in days, max 365
-last_pfm_values = 50    # in matchdays, max idk
+def main():
+    if not KB_EMAIL or not KB_PASSWORD:
+        raise ValueError("KB_EMAIL oder KB_PASSWORD Secret fehlt!")
 
-# which features to use for training and prediction
-features = [
-    "p", "mv", "days_to_next", 
-    "mv_change_1d", "mv_trend_1d", 
-    "mv_change_3d", "mv_vol_3d",
-    "mv_trend_7d", "market_divergence"
-]
+    print("Starte Login...")
+    token = login()
+    print("Login erfolgreich!")
 
-# what column to learn and predict on
-target = "mv_target_clipped"
+    headers = BASE_HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
 
-# Set dot as thousands separator for better readability
-pd.options.display.float_format = lambda x: '{:,.0f}'.format(x).replace(',', '.')
+    # 1. Spielerliste abrufen (Beispiel für v4 Endpoint)
+    print("Hole Spielerdaten...")
+    players_url = f"{API_BASE_URL}/v4/market"  # Oder entsprechender v4 Endpoint
+    res = fetch_with_retry(players_url, headers)
+    
+    if not res:
+        print("Fehler beim Abrufen der Marktdaten.")
+        return
 
-# Show all columns when displaying dataframes
-pd.set_option("display.max_columns", None)
-pd.set_option("display.max_rows", None)
-pd.set_option("display.width", 1000)
+    players_data = res.json().get("players", [])
+    print(f"{len(players_data)} Spieler gefunden.")
 
-# ----------------- USER SETTINGS -----------------
-# Adjust these settings to your preferences
+    predictions = []
 
-competition_ids = [1]                   # 1 = Bundesliga, 2 = 2. Bundesliga, 3 = La Liga
-league_name = "BUNDES-LIGA"  # Name of your league, must be exact match, can be done via env or hardcoded
-start_budget = 80_000_000               # Starting budget of your league, used to calculate current budgets of other managers
-league_start_date = "2025-09-04"        # Start date of your league, used to filter activities, format: YYYY-MM-DD
-email = os.getenv("EMAIL_USER")         # Email to send recommendations to, can be the same as EMAIL_USER or different
+    # 2. Schleife für Performance-Daten mit Delay zur Entlastung der API
+    for idx, player in enumerate(players_data):
+        player_id = player.get("id")
+        name = player.get("lastName", "Unbekannt")
+        
+        # Performance-URL
+        perf_url = f"{API_BASE_URL}/v4/competitions/1/players/{player_id}/performance"
+        
+        try:
+            perf_res = fetch_with_retry(perf_url, headers)
+            if perf_res:
+                perf_data = perf_res.json()
+                # Hier deine Vorhersage-Berechnung / Extraktion
+                predictions.append({
+                    "id": player_id,
+                    "name": name,
+                    "market_value": player.get("marketValue", 0),
+                    "performance": perf_data
+                })
+        except Exception as e:
+            print(f"Fehler bei Spieler {name} ({player_id}): {e}")
 
-# ---------------------------------------------------
+        # Rate-Limiting Bremse (200ms Pause zwischen Anfragen)
+        time.sleep(0.2)
 
-# Load environment variables and login to kickbase
-USERNAME = os.getenv("KICK_USER") # DO NOT CHANGE THIS, YOU MUST SET THOSE IN GITHUB SECRETS OR A .env FILE
-PASSWORD = os.getenv("KICK_PASS") # DO NOT CHANGE THIS, YOU MUST SET THOSE IN GITHUB SECRETS OR A .env FILE
-token = login(USERNAME, PASSWORD)
-print("\nLogged in to Kickbase.")
+        if (idx + 1) % 50 == 0:
+            print(f"{idx + 1}/{len(players_data)} Spieler verarbeitet...")
 
-# Get league ID
-league_id = get_league_id(token, league_name)
+    print(f"Fertig! {len(predictions)} Vorhersagen generiert.")
 
-# Calculate (estimated) budgets of all managers in the league
-manager_budgets_df = calc_manager_budgets(token, league_id, league_start_date, start_budget)
-print("\n=== Manager Budgets ===")
-display(manager_budgets_df)
+    # Ergebnisse speichern (z.B. als CSV oder JSON)
+    df = pd.DataFrame(predictions)
+    df.to_csv("predictions.csv", index=False)
+    print("Ergebnisse in predictions.csv gespeichert.")
 
-# Data handling
-create_player_data_table()
-reload_data = check_if_data_reload_needed()
-save_player_data_to_db(token, competition_ids, last_mv_values, last_pfm_values, reload_data)
-player_df = load_player_data_from_db()
-print("\nData loaded from database.")
-
-# Preprocess the data and spit the data
-proc_player_df, today_df = preprocess_player_data(player_df)
-X_train, X_test, y_train, y_test = split_data(proc_player_df, features, target)
-print("\nData preprocessed.")
-
-# Train and evaluate the model
-model = train_model(X_train, y_train)
-signs_percent, rmse, mae, r2 = evaluate_model(model, X_test, y_test)
-print(f"\nModel evaluation:\nSigns correct: {signs_percent:.2f}%\nRMSE: {rmse:.2f}\nMAE: {mae:.2f}\nR2: {r2:.2f}")
-
-# Make live data predictions
-live_predictions_df = live_data_predictions(today_df, model, features)
-
-# Join with current available players on the market
-market_recommendations_df = join_current_market(token, league_id, live_predictions_df)
-print("\n=== Market Recommendations ===")
-display(market_recommendations_df)
-
-# Join with current players on the team
-squad_recommendations_df = join_current_squad(token, league_id, live_predictions_df)
-print("\n=== Squad Recommendations ===")
-display(squad_recommendations_df)
-
-# Send email with recommendations
-send_mail(manager_budgets_df, market_recommendations_df, squad_recommendations_df, email)
+if __name__ == "__main__":
+    main()
