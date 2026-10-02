@@ -34,14 +34,25 @@ def fetch_with_retry(url, headers, max_retries=3, delay=1.0):
 def login():
     login_url = f"{API_BASE_URL}/v4/user/login"
     payload = {
-        "email": KB_EMAIL,
-        "password": KB_PASSWORD
+        "email": KB_EMAIL.strip(),
+        "password": KB_PASSWORD.strip(),
+        "ext": "false"
     }
     
-    response = requests.post(login_url, json=payload, headers=BASE_HEADERS, timeout=10)
+    # Erweitertes Handling für den Login-Call
+    session = requests.Session()
+    session.headers.update(BASE_HEADERS)
+    session.headers.update({
+        "User-Agent": "Kickbase/3.52.0 (Android; 13)",
+        "Accept-Language": "de-DE",
+        "Content-Type": "application/json; charset=UTF-8"
+    })
+    
+    response = session.post(login_url, json=payload, timeout=10)
     response.raise_for_status()
     data = response.json()
     return data.get("token")
+
 
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
