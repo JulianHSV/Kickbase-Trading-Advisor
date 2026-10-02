@@ -1,13 +1,22 @@
 import os
 import time
 import requests
-import pandas as pd
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
 load_dotenv()
 
-KB_EMAIL = os.getenv("KB_EMAIL") or "julianbuttler2701@gmail.com"
-KB_PASSWORD = os.getenv("KB_PASSWORD") or "pygmyq7faNni6pyxxoh"
+# Zugangsdaten aus den GitHub Secrets
+KB_EMAIL = os.getenv("julianbuttler2701@gmail.com")
+KB_PASSWORD = os.getenv("pygmyq7faNni6pyxxoh")
+
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USER = os.getenv("SMTP_USER") or KB_EMAIL
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") or KB_PASSWORD
+EMAIL_TO = os.getenv("EMAIL_TO") or KB_EMAIL
 
 API_BASE_URL = "https://api.kickbase.com"
 
@@ -39,81 +48,84 @@ def login():
         "password": KB_PASSWORD.strip(),
         "ext": "false"
     }
-    
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
-    
     response = session.post(login_url, json=payload, timeout=10)
     response.raise_for_status()
     data = response.json()
-    return data.get("token")
-
-def get_leagues(headers):
-    url = f"{API_BASE_URL}/v4/leagues"
-    resp = fetch_with_retry(url, headers)
-    if resp and resp.status_code == 200:
-        return resp.json().get("leagues", [])
-    return []
-
-def get_all_league_players(league_id, headers):
-    # Holen aller Spieler über den v4-Stats/Market-Kanal
-    url = f"{API_BASE_URL}/v4/leagues/{league_id}/players"
-    resp = fetch_with_retry(url, headers)
-    if resp and resp.status_code == 200:
-        return resp.json().get("players", [])
-    
-    # Fallback auf Liga-Ranking/Statistik
-    url_stats = f"{API_BASE_URL}/v4/leagues/{league_id}/stats/players"
-    resp_stats = fetch_with_retry(url_stats, headers)
-    if resp_stats and resp_stats.status_code == 200:
-        return resp_stats.json().get("players", [])
-    
-    return []
+    return data.get("token"), data.get("user", {}).get("id")
 
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
         raise ValueError("KB_EMAIL oder KB_PASSWORD fehlt!")
-        
-    print("Starte Kickbase Login...")
-    token = login()
-    print("Login erfolgreich!")
-    
+
+    token, user_id = login()
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
-    
-    leagues = get_leagues(headers)
+
+    # Liga holen
+    resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues", headers)
+    leagues = resp.json().get("leagues", []) if resp else []
     if not leagues:
-        print("Keine Ligen gefunden.")
+        print("Keine Liga gefunden.")
         return
-        
+    
     league_id = leagues[0].get("id")
-    print(f"Verwende Liga-ID: {league_id}")
-    
-    players = get_all_league_players(league_id, headers)
-    print(f"{len(players)} Spieler geladen. Starte Berechnung...")
-    
-    predictions = []
-    for player in players:
-        p_id = player.get("id")
-        p_name = f"{player.get('firstName', '')} {player.get('lastName', '')}".strip() or player.get("name", "Unbekannt")
-        mv = player.get("marketValue", 0)
-        mv_change = player.get("marketValueChange", 0)
-        
-        trend_factor = 1.05 if mv_change > 0 else 0.95
-        predicted_mv = int(mv * trend_factor)
-        
-        predictions.append({
-            "player_id": p_id,
-            "name": p_name,
-            "market_value": mv,
-            "mv_change": mv_change,
-            "predicted_market_value": predicted_mv
-        })
-        time.sleep(0.1)
-        
-    df = pd.DataFrame(predictions)
-    df.to_csv("predictions.csv", index=False)
-    print(f"Fertig! Insgesamt {len(predictions)} Spieler verarbeitet.")
+
+    # 1. Eigener Kader
+    resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{user_id}/players", headers)
+    squad_players = resp_squad.json().get("players", []) if resp_squad else []
+
+    squad_text = "--- DEIN KADER ---\n"
+    for p in squad_players:
+        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name", "Spieler")
+        mv = p.get("marketValue", 0)
+        change = p.get("marketValueChange", 0)
+        squad_text += f"• {name}: {mv:,} € ({'+' if change >= 0 else ''}{change:,} €)\n"
+
+    # 2. Transfermarkt
+    resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
+    mkt_players = resp_mkt.json().get("players", []) if resp_mkt else []
+
+    mkt_text = "\n--- TRANSFERMARKT ---\n"
+    for p in mkt_players:
+        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name", "Spieler")
+        price = p.get("price", 0)
+        mv = p.get("marketValue", 0)
+        seller = p.get("sellerName", "Kickbase")
+        mkt_text += f"• {name} | Preis: {price:,} € | MV: {mv:,} € | Verkäufer: {seller}\n"
+
+    # 3. Manager Budgets / Punkteübersicht
+    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
+    users = resp_users.json().get("users", []) if resp_users else []
+
+    budget_text = "\n--- LIGA MANAGER ---\n"
+    for u in users:
+        u_name = u.get("name", "Manager")
+        team_val = u.get("teamValue", 0)
+        budget = u.get("budget", 0)
+        budget_text += f"• {u_name} | Teamwert: {team_val:,} € | Geschätztes Budget: {budget:,} €\n"
+
+    # E-Mail Zusammenbau
+    full_email_body = f"Moin Julian,\n\nhier ist dein aktuelles Kickbase Update:\n\n"
+    full_email_body += squad_text + mkt_text + budget_text + "\nViel Erfolg heute!"
+
+    # E-Mail Versand
+    if SMTP_USER and SMTP_PASSWORD:
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USER
+        msg['To'] = EMAIL_TO
+        msg['Subject'] = "Dein tägliches Kickbase Update"
+        msg.attach(MIMEText(full_email_body, 'plain', 'utf-8'))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("E-Mail erfolgreich versendet!")
+    else:
+        print("SMTP Daten fehlen, E-Mail konnte nicht gesendet werden.")
 
 if __name__ == "__main__":
     main()
