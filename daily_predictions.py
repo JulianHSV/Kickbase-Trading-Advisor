@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-KB_EMAIL = os.getenv("KB_EMAIL")
-KB_PASSWORD = os.getenv("KB_PASSWORD")
+KB_EMAIL = os.getenv("julianbuttler2701@gmail.com")
+KB_PASSWORD = os.getenv("pygmyq7faNni6pyxxoh")
 
 API_BASE_URL = "https://api.kickbase.com"
 
