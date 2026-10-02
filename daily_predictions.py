@@ -55,12 +55,18 @@ def get_leagues(headers):
         return resp.json().get("leagues", [])
     return []
 
-def get_market_players(league_id, headers):
-    url = f"{API_BASE_URL}/v4/leagues/{league_id}/market"
+def get_teams(league_id, headers):
+    url = f"{API_BASE_URL}/v4/leagues/{league_id}/teams"
     resp = fetch_with_retry(url, headers)
     if resp and resp.status_code == 200:
-        data = resp.json()
-        return data.get("players", []) or data.get("market", [])
+        return resp.json().get("teams", [])
+    return []
+
+def get_team_players(league_id, team_id, headers):
+    url = f"{API_BASE_URL}/v4/leagues/{league_id}/teams/{team_id}/players"
+    resp = fetch_with_retry(url, headers)
+    if resp and resp.status_code == 200:
+        return resp.json().get("players", [])
     return []
 
 def main():
@@ -82,32 +88,43 @@ def main():
     league_id = leagues[0].get("id")
     print(f"Verwende Liga-ID: {league_id}")
     
-    players = get_market_players(league_id, headers)
-    print(f"{len(players)} Spieler auf dem Transfermarkt gefunden.")
+    teams = get_teams(league_id, headers)
+    print(f"{len(teams)} Teams gefunden. Starte Abruf aller Spieler...")
     
     predictions = []
-    for player in players:
-        p_id = player.get("id")
-        p_name = f"{player.get('firstName', '')} {player.get('lastName', '')}".strip() or player.get("name", "Unbekannt")
-        mv = player.get("marketValue", 0)
-        mv_change = player.get("marketValueChange", 0)
+    
+    for team in teams:
+        team_id = team.get("id")
+        team_name = team.get("name", "Unbekannt")
         
-        # Berechnung des prognostizierten Trends
-        trend_factor = 1.05 if mv_change > 0 else 0.95
-        predicted_mv = int(mv * trend_factor)
+        players = get_team_players(league_id, team_id, headers)
+        print(f"Lade {len(players)} Spieler für {team_name}...")
         
-        predictions.append({
-            "player_id": p_id,
-            "name": p_name,
-            "market_value": mv,
-            "mv_change": mv_change,
-            "predicted_market_value": predicted_mv
-        })
-        time.sleep(0.2)
-        
+        for player in players:
+            p_id = player.get("id")
+            p_name = f"{player.get('firstName', '')} {player.get('lastName', '')}".strip() or player.get("name", "Unbekannt")
+            mv = player.get("marketValue", 0)
+            mv_change = player.get("marketValueChange", 0)
+            
+            # Trend-Berechnung
+            trend_factor = 1.05 if mv_change > 0 else 0.95
+            predicted_mv = int(mv * trend_factor)
+            
+            predictions.append({
+                "player_id": p_id,
+                "name": p_name,
+                "team": team_name,
+                "market_value": mv,
+                "mv_change": mv_change,
+                "predicted_market_value": predicted_mv
+            })
+            time.sleep(0.15)  # Rate Limit Schutz
+            
+        time.sleep(0.5)
+
     df = pd.DataFrame(predictions)
     df.to_csv("predictions.csv", index=False)
-    print("predictions.csv erfolgreich aktualisiert!")
+    print(f"Fertig! Insgesamt {len(predictions)} Spieler verarbeitet und in predictions.csv gespeichert.")
 
 if __name__ == "__main__":
     main()
