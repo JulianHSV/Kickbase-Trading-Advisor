@@ -2,9 +2,8 @@ name: Daily Predictions
 
 on:
   schedule:
-    # Läuft jeden Tag automatisch um 06:00 Uhr UTC
     - cron: '0 6 * * *'
-  workflow_dispatch: # Erlaubt das manuelle Starten über den "Run workflow" Button
+  workflow_dispatch:
 
 jobs:
   run-daily-predictions:
