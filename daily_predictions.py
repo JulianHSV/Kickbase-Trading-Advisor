@@ -8,15 +8,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Zugangsdaten aus den GitHub Secrets
-KB_EMAIL = os.getenv("julianbuttler2701@gmail.com")
-KB_PASSWORD = os.getenv("pygmyq7faNni6pyxxoh")
+# DIREKTINGABE (Verhindert jegliche Secret-Fehler)
+KB_EMAIL = "julianbuttler2701@gmail.com"
+KB_PASSWORD = "pygmyq7faNni6pyxxoh"
 
+# E-Mail Absender / Empfänger
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER = os.getenv("SMTP_USER") or KB_EMAIL
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") or KB_PASSWORD
-EMAIL_TO = os.getenv("EMAIL_TO") or KB_EMAIL
+SMTP_USER = os.getenv("SMTP_USER") or os.getenv("EMAIL_USER") or KB_EMAIL
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") or os.getenv("EMAIL_PASS") or KB_PASSWORD
+EMAIL_TO = os.getenv("EMAIL_TO") or os.getenv("EMAIL_USER") or KB_EMAIL
 
 API_BASE_URL = "https://api.kickbase.com"
 
@@ -95,7 +96,7 @@ def main():
         seller = p.get("sellerName", "Kickbase")
         mkt_text += f"• {name} | Preis: {price:,} € | MV: {mv:,} € | Verkäufer: {seller}\n"
 
-    # 3. Manager Budgets / Punkteübersicht
+    # 3. Manager Budgets
     resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
     users = resp_users.json().get("users", []) if resp_users else []
 
