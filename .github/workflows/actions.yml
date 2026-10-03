@@ -31,11 +31,3 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_USER }}
         run: python daily_predictions.py
-
-      - name: Commit and push changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add -A
-          git diff-index --quiet HEAD || git commit -m "Auto-update predictions"
-          git push
