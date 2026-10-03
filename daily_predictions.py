@@ -63,7 +63,6 @@ def login():
     user_info = data.get("u") or {}
     user_id = user_info.get("id") or user_info.get("i")
     
-    # Greift exakt auf das Array 'lins' aus dem JSON zu
     leagues = data.get("lins") or []
     
     return token, user_id, leagues
@@ -109,7 +108,7 @@ def main():
         total_daily_change += change
         
         trend = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-        squad_lines.append(f"  • {name}: {mv:,} € ({trend} {change:+,,} €)")
+        squad_lines.append(f"  • {name}: {mv:,} € ({trend} {change:+,} €)")
 
     # 2. TRANSFERMARKT
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
@@ -122,7 +121,7 @@ def main():
         mv = p.get("mv") or p.get("marketValue", 0)
         seller = p.get("sn") or p.get("sellerName", "Kickbase")
         diff = price - mv
-        diff_str = f"({diff:+,,} € zum MV)" if diff != 0 else "(Marktwert)"
+        diff_str = f"({diff:+,} € zum MV)" if diff != 0 else "(Marktwert)"
         
         mkt_lines.append(f"  • {name} | Preis: {price:,} € {diff_str} | Verkäufer: {seller}")
 
@@ -147,7 +146,7 @@ hier ist dein tägliches Kickbase Update für die Liga "{league_name}":
 1. KADER-ÜBERSICHT & PROGNOSE
 ========================================
 Gesamtwert Kader: {total_squad_value:,} €
-Tagesveränderung: {total_daily_change:+,,} €
+Tagesveränderung: {total_daily_change:+,} €
 
 Einzelwerte:
 """ + ("\n".join(squad_lines) if squad_lines else "  Keine Kaderspieler geladen.") + f"""
@@ -170,7 +169,7 @@ Viel Erfolg auf dem Transfermarkt!
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = EMAIL_TO
-        msg['Subject'] = f"Kickbase Update: {total_daily_change:+,,} € heute"
+        msg['Subject'] = f"Kickbase Update: {total_daily_change:+,} € heute"
         msg.attach(MIMEText(email_body, 'plain', 'utf-8'))
 
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
