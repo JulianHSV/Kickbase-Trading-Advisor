@@ -29,9 +29,18 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
+# Team-ID Mapping für Klarnamen
+TEAMS = {
+    "2": "Bayern", "3": "Dortmund", "4": "RB Leipzig", "5": "Leverkusen",
+    "6": "Wolfsburg", "7": "Gladbach", "8": "Bremen", "9": "Stuttgart",
+    "10": "Frankfurt", "13": "Augsburg", "14": "Hoffenheim", "15": "Mainz",
+    "18": "Freiburg", "28": "Köln", "29": "Heidenheim", "40": "Union Berlin",
+    "42": "St. Pauli", "43": "Holstein Kiel"
+}
+
 def fmt_de(val):
     if pd.isna(val) or val is None:
-        return ""
+        return "0"
     try:
         val = float(val)
         return f"{val:,.0f}".replace(",", ".")
@@ -69,7 +78,7 @@ def login():
     return token, user_id, leagues
 
 def get_player_prediction(league_id, player_id, headers):
-    """Holt Spieler-Details und berechnet die Marktwert-Prognose."""
+    """Holt Marktwert und echten Zuwachs aus der Detail-API."""
     resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
     if not resp or resp.status_code != 200:
         return 0, 0, 0
@@ -77,17 +86,12 @@ def get_player_prediction(league_id, player_id, headers):
     p_detail = resp.json()
     mv = p_detail.get("mv") or p_detail.get("marketValue") or 0
     
-    # Zuwachs gestern/heute
-    change_yesterday = p_detail.get("mvc") or p_detail.get("marketValueChange") or 0
+    # Marktwertveränderung aus v4 parsen
+    change_yesterday = p_detail.get("mvc") or p_detail.get("marketValueChange") or p_detail.get("mvt") or 0
     
-    # Prognose für morgen: Trend-Berechnung aus der Historie / Zuwachs
-    # Falls historische Kurve da ist, Dämpfung/Trend-Faktor anwenden
-    if change_yesterday != 0:
-        # Typische Kickbase-Trendberechnung: Zuwachs setzt sich zu ~90-95% fort
-        predicted_target = int(change_yesterday * 0.92)
-    else:
-        predicted_target = 0
-        
+    # Trendberechnung
+    predicted_target = change_yesterday
+
     return mv, change_yesterday, predicted_target
 
 def main():
@@ -105,16 +109,16 @@ def main():
     first_league = leagues[0]
     league_id = first_league.get("i") or first_league.get("id")
 
-    # 1. MANAGER BUDGETS
-    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
+    # 1. MANAGER BUDGETS (v4 Endpunkt: /users)
+    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
     budget_data = []
     if resp_users and resp_users.status_code == 200:
-        users = resp_users.json().get("it", [])
+        users = resp_users.json().get("users", []) or resp_users.json().get("it", []) or resp_users.json().get("u", [])
         for u in users:
-            name = u.get("n", "Manager")
-            budget = u.get("b", 0)
-            team_val = u.get("tv", 0)
-            max_neg = u.get("mneg", int(-team_val * 0.33))
+            name = u.get("n") or u.get("name", "Manager")
+            budget = u.get("b") or u.get("budget", 0)
+            team_val = u.get("tv") or u.get("teamValue", 0)
+            max_neg = int(-team_val * 0.33)
             avail = budget - max_neg
             
             budget_data.append({
@@ -131,17 +135,20 @@ def main():
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
     market_data = []
     if resp_mkt and resp_mkt.status_code == 200:
-        mkt_players = resp_mkt.json().get("it", [])
+        mkt_players = resp_mkt.json().get("it", []) or resp_mkt.json().get("players", [])
         for p in mkt_players:
-            p_id = p.get("i")
-            last_name = p.get("n", "")
-            team = p.get("tn") or p.get("tid", "")
+            p_id = p.get("i") or p.get("id")
+            last_name = p.get("n") or p.get("lastName", "")
+            tid = str(p.get("tid") or p.get("teamId", ""))
+            team_name = TEAMS.get(tid, tid)
             
             mv, change_yesterday, pred_target = get_player_prediction(league_id, p_id, headers)
+            if mv == 0:
+                mv = p.get("mv", 0)
 
             market_data.append({
                 "last_name": last_name,
-                "team_name": team,
+                "team_name": team_name,
                 "mv": fmt_de(mv),
                 "mv_change_yesterday": fmt_de(change_yesterday),
                 "predicted_mv_target": fmt_de(pred_target),
@@ -151,25 +158,23 @@ def main():
             })
 
     df_market = pd.DataFrame(market_data)
-    if not df_market.empty and "predicted_mv_target" in df_market.columns:
-        # Sortieren nach höchstem prognostizierten Zuwachs
-        df_market = df_market.sort_values(by="predicted_mv_target", ascending=False)
 
     # 3. SQUAD PREDICTIONS
     resp_lineup = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/lineup", headers)
     squad_data = []
     if resp_lineup and resp_lineup.status_code == 200:
-        squad_players = resp_lineup.json().get("it", [])
+        squad_players = resp_lineup.json().get("it", []) or resp_lineup.json().get("players", [])
         for p in squad_players:
-            p_id = p.get("i")
-            last_name = p.get("n", "")
-            team = p.get("tn") or p.get("tid", "")
+            p_id = p.get("i") or p.get("id")
+            last_name = p.get("n") or p.get("lastName", "")
+            tid = str(p.get("tid") or p.get("teamId", ""))
+            team_name = TEAMS.get(tid, tid)
             
             mv, change_yesterday, pred_target = get_player_prediction(league_id, p_id, headers)
 
             squad_data.append({
                 "last_name": last_name,
-                "team_name": team,
+                "team_name": team_name,
                 "mv": fmt_de(mv),
                 "mv_change_yesterday": fmt_de(change_yesterday),
                 "predicted_mv_target": fmt_de(pred_target),
@@ -178,7 +183,7 @@ def main():
 
     df_squad = pd.DataFrame(squad_data)
 
-    # HTML REPORT ERSTELLEN (Exaktes Kickbase Trading Advisor Template)
+    # HTML REPORT ERSTELLEN
     today_str = datetime.now().strftime("%d-%m-%Y")
     
     html_content = f"""
