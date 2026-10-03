@@ -20,9 +20,9 @@ EMAIL_TO = os.getenv("EMAIL_TO") or os.getenv("EMAIL_USER") or KB_EMAIL
 
 API_BASE_URL = "https://api.kickbase.com"
 
-# AKTUELLES USER-AGENT HEADER (wichtig gegen ClientTooOld)
+# AKTUELLES USER-AGENT HEADER (v4.8.3 verhindert ClientTooOld)
 BASE_HEADERS = {
-    "User-Agent": "Kickbase/4.2.0 (Android; 14)",
+    "User-Agent": "Kickbase/4.8.3 (Android; 14)",
     "Accept": "application/json",
     "Accept-Language": "de-DE",
     "Content-Type": "application/json; charset=UTF-8"
@@ -44,23 +44,29 @@ def fetch_with_retry(url, headers, max_retries=3):
 
 def login():
     login_url = f"{API_BASE_URL}/v4/user/login"
+    
+    # Payload für API v4
     payload = {
-        "email": KB_EMAIL.strip(),
-        "password": KB_PASSWORD.strip(),
-        "ext": "false"
+        "em": KB_EMAIL.strip(),
+        "pass": KB_PASSWORD.strip(),
+        "loy": False,
+        "rep": {}
     }
+    
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
     response = session.post(login_url, json=payload, timeout=10)
     response.raise_for_status()
     data = response.json()
     
-    if data.get("err") == 5 or "token" not in data:
-        raise ValueError(f"Login fehlgeschlagen: {data.get('errMsg', 'Kein Token')}")
+    if "err" in data and data["err"] != 0:
+        raise ValueError(f"Login fehlgeschlagen: {data.get('errMsg', 'Fehler beim Login')}")
         
-    token = data.get("token")
-    user_id = data.get("user", {}).get("id")
-    leagues = data.get("leagues", []) or data.get("user", {}).get("leagues", [])
+    token = data.get("tkn") or data.get("token")
+    user_info = data.get("u") or data.get("user") or {}
+    user_id = user_info.get("id") or user_info.get("i")
+    leagues = data.get("srvl") or data.get("leagues") or []
+    
     return token, user_id, leagues
 
 def main():
@@ -75,14 +81,15 @@ def main():
         resp = fetch_with_retry(f"{API_BASE_URL}/v4/user/me", headers)
         if resp:
             me_data = resp.json()
-            leagues = me_data.get("leagues", []) or me_data.get("user", {}).get("leagues", [])
+            leagues = me_data.get("srvl") or me_data.get("leagues") or []
 
     if not leagues:
         print("Keine Liga gefunden.")
         return
 
-    league_id = leagues[0].get("id")
-    league_name = leagues[0].get("name", "Kickbase Liga")
+    first_league = leagues[0]
+    league_id = first_league.get("id") or first_league.get("i")
+    league_name = first_league.get("name") or first_league.get("n", "Kickbase Liga")
     print(f"Erfolgreich eingeloggt in Liga: {league_name} ({league_id})")
 
     # 1. KADER & MARKTWERT-TRENDS
@@ -94,9 +101,9 @@ def main():
     squad_lines = []
 
     for p in squad_players:
-        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name", "Spieler")
-        mv = p.get("marketValue", 0)
-        change = p.get("marketValueChange", 0)
+        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name") or p.get("n", "Spieler")
+        mv = p.get("marketValue") or p.get("mv", 0)
+        change = p.get("marketValueChange") or p.get("mvc", 0)
         total_squad_value += mv
         total_daily_change += change
         
@@ -109,10 +116,10 @@ def main():
 
     mkt_lines = []
     for p in mkt_players:
-        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name", "Spieler")
-        price = p.get("price", 0)
-        mv = p.get("marketValue", 0)
-        seller = p.get("sellerName", "Kickbase")
+        name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name") or p.get("n", "Spieler")
+        price = p.get("price") or p.get("p", 0)
+        mv = p.get("marketValue") or p.get("mv", 0)
+        seller = p.get("sellerName") or p.get("sn", "Kickbase")
         diff = price - mv
         diff_str = f"({diff:+,,} € zum MV)" if diff != 0 else "(Marktwert)"
         
@@ -124,10 +131,10 @@ def main():
 
     budget_lines = []
     for u in users:
-        u_name = u.get("name", "Manager")
-        team_val = u.get("teamValue", 0)
-        budget = u.get("budget", 0)
-        points = u.get("points", 0)
+        u_name = u.get("name") or u.get("n", "Manager")
+        team_val = u.get("teamValue") or u.get("tv", 0)
+        budget = u.get("budget") or u.get("b", 0)
+        points = u.get("points") or u.get("pt", 0)
         budget_lines.append(f"  • {u_name} | Punkte: {points:,} | Teamwert: {team_val:,} € | Geschätztes Budget: {budget:,} €")
 
     # E-MAIL SUMMARY FORMATIERUNG
