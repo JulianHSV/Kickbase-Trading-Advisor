@@ -89,7 +89,7 @@ def main():
     league_name = first_league.get("n") or first_league.get("name", "Kickbase Liga")
     print(f"Erfolgreich eingeloggt in Liga: {league_name} (ID: {league_id})")
 
-    # 1. KADER / LINEUP (v4 Endpunkt)
+    # 1. KADER & MARKTWERTE (über Spieler-Details der Lineup-IDs)
     squad_players = []
     resp_lineup = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/lineup", headers)
     if resp_lineup and resp_lineup.status_code == 200:
@@ -101,20 +101,33 @@ def main():
     squad_lines = []
 
     for p in squad_players:
+        player_id = p.get("i") or p.get("id")
         fn = p.get("fn", "")
         ln = p.get("n", "") or p.get("lastName", "")
         name = f"{fn} {ln}".strip() or "Spieler"
         
-        mv = p.get("mv") or p.get("marketValue", 0)
-        change = p.get("mvt") or p.get("mvc") or p.get("marketValueChange", 0)
-        
+        mv = p.get("mv") or p.get("v") or p.get("m") or 0
+        change = p.get("mvt") or p.get("mvc") or p.get("c") or 0
+
+        # Wenn der Lineup-Endpunkt den Marktwert auf 0 belässt, Detail-API abfragen
+        if mv == 0 and player_id:
+            resp_p = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
+            if resp_p and resp_p.status_code == 200:
+                p_detail = resp_p.json()
+                mv = p_detail.get("mv") or p_detail.get("marketValue") or 0
+                change = p_detail.get("mvt") or p_detail.get("marketValueTrend") or p_detail.get("mvc") or 0
+                if not name or name == "Spieler":
+                    fn = p_detail.get("fn", "")
+                    ln = p_detail.get("n", "")
+                    name = f"{fn} {ln}".strip()
+
         total_squad_value += mv
         total_daily_change += change
         
         trend = "📈" if change > 0 else "📉" if change < 0 else "➡️"
         squad_lines.append(f"  • {name}: {mv:,} € ({trend} {change:+,} €)")
 
-    # 2. TRANSFERMARKT (v4 Auswertung)
+    # 2. TRANSFERMARKT
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
     mkt_players = []
     if resp_mkt and resp_mkt.status_code == 200:
@@ -136,7 +149,7 @@ def main():
         
         mkt_lines.append(f"  • {name} | Preis: {price:,} € {diff_str} | Verkäufer: {seller}")
 
-    # 3. LIGA-TABELLE / RANKING (v4 Endpunkt)
+    # 3. LIGA-TABELLE
     resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
     users = []
     if resp_users and resp_users.status_code == 200:
