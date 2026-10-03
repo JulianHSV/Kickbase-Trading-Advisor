@@ -25,13 +25,11 @@ jobs:
 
       - name: Run daily_predictions.py
         env:
-          KB_EMAIL: ${{ secrets.KB_EMAIL }}
-          KB_PASSWORD: ${{ secrets.KB_PASSWORD }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          KB_EMAIL: ${{ secrets.KICK_USER }}
+          KB_PASSWORD: ${{ secrets.KICK_PASS }}
+          SMTP_USER: ${{ secrets.EMAIL_USER }}
+          SMTP_PASSWORD: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_USER }}
         run: python daily_predictions.py
 
       - name: Commit and push changes
