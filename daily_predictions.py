@@ -56,41 +56,52 @@ def login():
     data = response.json()
     token = data.get("token")
     user_id = data.get("user", {}).get("id")
-    leagues = data.get("leagues", []) or data.get("user", {}).get("leagues", [])
-    return token, user_id, leagues
+    return token, user_id
 
-def get_leagues(headers, leagues_from_login):
-    if leagues_from_login:
-        return leagues_from_login
+def get_user_leagues(headers):
+    # 1. Hauptweg: /v4/user/me enthält das vollständige Nutzerprofil samt Ligen
+    resp = fetch_with_retry(f"{API_BASE_URL}/v4/user/me", headers)
+    if resp and resp.status_code == 200:
+        me_data = resp.json()
+        leagues = me_data.get("leagues", []) or me_data.get("user", {}).get("leagues", [])
+        if leagues:
+            return leagues
 
-    endpoints = [
-        f"{API_BASE_URL}/v4/user/leagues",
-        f"{API_BASE_URL}/leagues"
-    ]
-    for url in endpoints:
-        resp = fetch_with_retry(url, headers)
-        if resp and resp.status_code == 200:
-            data = resp.json()
-            leagues = data if isinstance(data, list) else data.get("leagues", [])
-            if leagues:
-                return leagues
+    # 2. Fallback: /v4/user/leagues
+    resp = fetch_with_retry(f"{API_BASE_URL}/v4/user/leagues", headers)
+    if resp and resp.status_code == 200:
+        data = resp.json()
+        leagues = data if isinstance(data, list) else data.get("leagues", [])
+        if leagues:
+            return leagues
+
+    # 3. Fallback: Alte v3 Route /leagues
+    resp = fetch_with_retry(f"{API_BASE_URL}/leagues", headers)
+    if resp and resp.status_code == 200:
+        data = resp.json()
+        leagues = data if isinstance(data, list) else data.get("leagues", [])
+        if leagues:
+            return leagues
+
     return []
 
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
         raise ValueError("KB_EMAIL oder KB_PASSWORD fehlt!")
 
-    token, user_id, leagues_from_login = login()
+    token, user_id = login()
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
-    leagues = get_leagues(headers, leagues_from_login)
+    leagues = get_user_leagues(headers)
+    
     if not leagues:
-        print("Keine Liga gefunden.")
+        print("FEHLER: Es konnten keine Ligen abgerufen werden.")
         return
 
     league_id = leagues[0].get("id")
     league_name = leagues[0].get("name", "Kickbase Liga")
+    print(f"Erfolgreich eingeloggt. Liga: {league_name} ({league_id})")
 
     # 1. KADER & MARKTWERT-TRENDS
     resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{user_id}/players", headers)
@@ -169,7 +180,7 @@ Viel Erfolg auf dem Transfermarkt!
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = EMAIL_TO
-        msg['Subject'] = f" Kickbase Update: {total_daily_change:+,,} € heute"
+        msg['Subject'] = f"Kickbase Update: {total_daily_change:+,,} € heute"
         msg.attach(MIMEText(email_body, 'plain', 'utf-8'))
 
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
