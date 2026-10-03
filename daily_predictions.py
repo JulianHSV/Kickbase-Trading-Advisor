@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ZUGANGSDATEN AUS ENVIRONMENT / SECRETS
 KB_EMAIL = os.getenv("KB_EMAIL") or os.getenv("KICK_USER")
 KB_PASSWORD = os.getenv("KB_PASSWORD") or os.getenv("KICK_PASS")
 
@@ -20,7 +19,6 @@ EMAIL_TO = os.getenv("EMAIL_TO") or os.getenv("EMAIL_USER") or KB_EMAIL
 
 API_BASE_URL = "https://api.kickbase.com"
 
-# AKTUELLES USER-AGENT HEADER (v4.8.3 verhindert ClientTooOld)
 BASE_HEADERS = {
     "User-Agent": "Kickbase/4.8.3 (Android; 14)",
     "Accept": "application/json",
@@ -44,8 +42,6 @@ def fetch_with_retry(url, headers, max_retries=3):
 
 def login():
     login_url = f"{API_BASE_URL}/v4/user/login"
-    
-    # Payload für API v4
     payload = {
         "em": KB_EMAIL.strip(),
         "pass": KB_PASSWORD.strip(),
@@ -63,25 +59,28 @@ def login():
         raise ValueError(f"Login fehlgeschlagen: {data.get('errMsg', 'Fehler beim Login')}")
         
     token = data.get("tkn") or data.get("token")
-    user_info = data.get("u") or data.get("user") or {}
-    user_id = user_info.get("id") or user_info.get("i")
-    leagues = data.get("srvl") or data.get("leagues") or []
     
-    return token, user_id, leagues
+    # Extrahiere Ligen aus allen möglichen Pfaden im Login-Payload
+    leagues = data.get("srvl") or data.get("leagues") or []
+    if not leagues and "it" in data:
+        leagues = [item for item in data["it"] if item.get("ti") == 2 or "name" in item or "n" in item]
+        
+    return token, leagues
 
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
         raise ValueError("KB_EMAIL oder KB_PASSWORD fehlt!")
 
-    token, user_id, leagues = login()
+    token, leagues = login()
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
+    # Falls Login-Payload keine Ligen enthielt, explizit über den v4/leagues Endpunkt holen
     if not leagues:
-        resp = fetch_with_retry(f"{API_BASE_URL}/v4/user/me", headers)
+        resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues", headers)
         if resp:
-            me_data = resp.json()
-            leagues = me_data.get("srvl") or me_data.get("leagues") or []
+            l_data = resp.json()
+            leagues = l_data.get("leagues") or l_data.get("it") or []
 
     if not leagues:
         print("Keine Liga gefunden.")
@@ -93,7 +92,10 @@ def main():
     print(f"Erfolgreich eingeloggt in Liga: {league_name} ({league_id})")
 
     # 1. KADER & MARKTWERT-TRENDS
-    resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{user_id}/players", headers)
+    resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/me/players", headers)
+    if not resp_squad:
+        resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players", headers)
+        
     squad_players = resp_squad.json().get("players", []) if resp_squad else []
 
     total_squad_value = 0
@@ -125,7 +127,7 @@ def main():
         
         mkt_lines.append(f"  • {name} | Preis: {price:,} € {diff_str} | Verkäufer: {seller}")
 
-    # 3. LIGA-TABELLE & FINANZEN
+    # 3. LIGA-TABELLE
     resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
     users = resp_users.json().get("users", []) if resp_users else []
 
@@ -137,7 +139,7 @@ def main():
         points = u.get("points") or u.get("pt", 0)
         budget_lines.append(f"  • {u_name} | Punkte: {points:,} | Teamwert: {team_val:,} € | Geschätztes Budget: {budget:,} €")
 
-    # E-MAIL SUMMARY FORMATIERUNG
+    # E-MAIL SUMMARY
     email_body = f"""Moin Julian,
 
 hier ist dein tägliches Kickbase Update für die Liga "{league_name}":
@@ -149,7 +151,7 @@ Gesamtwert Kader: {total_squad_value:,} €
 Tagesveränderung: {total_daily_change:+,,} €
 
 Einzelwerte:
-""" + "\n".join(squad_lines) + f"""
+""" + ("\n".join(squad_lines) if squad_lines else "  Keine Kaderspieler geladen.") + f"""
 
 ========================================
 2. TRANSFERMARKT
@@ -159,7 +161,7 @@ Einzelwerte:
 ========================================
 3. LIGA-TABELLE & FINANZEN
 ========================================
-""" + "\n".join(budget_lines) + """
+""" + ("\n".join(budget_lines) if budget_lines else "  Keine Liga-Daten geladen.") + """
 
 Viel Erfolg auf dem Transfermarkt!
 """
