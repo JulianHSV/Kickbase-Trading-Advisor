@@ -85,6 +85,7 @@ def get_user_leagues(headers):
 
     return []
 
+
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
         raise ValueError("KB_EMAIL oder KB_PASSWORD fehlt!")
@@ -102,7 +103,6 @@ def main():
     league_id = leagues[0].get("id")
     league_name = leagues[0].get("name", "Kickbase Liga")
     print(f"Erfolgreich eingeloggt. Liga: {league_name} ({league_id})")
-
     # 1. KADER & MARKTWERT-TRENDS
     resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{user_id}/players", headers)
     squad_players = resp_squad.json().get("players", []) if resp_squad else []
