@@ -56,30 +56,55 @@ def login():
     data = response.json()
     return data.get("token"), data.get("user", {}).get("id")
 
+def login():
+    login_url = f"{API_BASE_URL}/v4/user/login"
+    payload = {
+        "email": KB_EMAIL.strip(),
+        "password": KB_PASSWORD.strip(),
+        "ext": "false"
+    }
+    session = requests.Session()
+    session.headers.update(BASE_HEADERS)
+    response = session.post(login_url, json=payload, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    token = data.get("token")
+    user_id = data.get("user", {}).get("id")
+    
+    # Ligen direkt aus dem Login-Objekt abfangen, falls vorhanden
+    leagues = data.get("leagues", []) or data.get("user", {}).get("leagues", [])
+    return token, user_id, leagues
+
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
         raise ValueError("KB_EMAIL oder KB_PASSWORD fehlt!")
 
-    token, user_id = login()
+    token, user_id, leagues_from_login = login()
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
-        # Liga holen (v4 kompatibel)
-    resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues", headers)
-    leagues_data = resp.json() if resp else {}
-    
-    # In v4 kann die Antwort entweder eine Liste oder ein Dictionary mit "leagues" sein
-    if isinstance(leagues_data, list):
-        leagues = leagues_data
-    else:
-        leagues = leagues_data.get("leagues", [])
-        
+    # Liga holen
+    leagues = leagues_from_login
     if not leagues:
-        print("Keine Liga gefunden. API-Antwort:", leagues_data)
+        resp = fetch_with_retry(f"{API_BASE_URL}/v4/user/leagues", headers)
+        if resp and resp.status_code == 200:
+            leagues_data = resp.json()
+            leagues = leagues_data if isinstance(leagues_data, list) else leagues_data.get("leagues", [])
+
+    if not leagues:
+        # Fallback auf v3 Endpunkt
+        resp = fetch_with_retry(f"{API_BASE_URL}/leagues", headers)
+        if resp and resp.status_code == 200:
+            leagues_data = resp.json()
+            leagues = leagues_data if isinstance(leagues_data, list) else leagues_data.get("leagues", [])
+
+    if not leagues:
+        print("Keine Liga gefunden.")
         return
-    
+
     league_id = leagues[0].get("id")
-    print(f"Liga erfolgreich gefunden: {league_id}")
+    print(f"Liga ID gefunden: {league_id}")
+
 
 
     # 1. Eigener Kader
