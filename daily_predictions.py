@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# DIREKTINGABE (Verhindert jegliche Secret-Fehler)
+# DIREKTEINGABE
 KB_EMAIL = "julianbuttler2701@gmail.com"
 KB_PASSWORD = "pygmyq7faNni6pyxxoh"
 
-# E-Mail Absender / Empfänger
+# E-Mail Konfiguration
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER") or os.getenv("EMAIL_USER") or KB_EMAIL
@@ -54,26 +54,27 @@ def login():
     response = session.post(login_url, json=payload, timeout=10)
     response.raise_for_status()
     data = response.json()
-    return data.get("token"), data.get("user", {}).get("id")
-
-def login():
-    login_url = f"{API_BASE_URL}/v4/user/login"
-    payload = {
-        "email": KB_EMAIL.strip(),
-        "password": KB_PASSWORD.strip(),
-        "ext": "false"
-    }
-    session = requests.Session()
-    session.headers.update(BASE_HEADERS)
-    response = session.post(login_url, json=payload, timeout=10)
-    response.raise_for_status()
-    data = response.json()
     token = data.get("token")
     user_id = data.get("user", {}).get("id")
-    
-    # Ligen direkt aus dem Login-Objekt abfangen, falls vorhanden
     leagues = data.get("leagues", []) or data.get("user", {}).get("leagues", [])
     return token, user_id, leagues
+
+def get_leagues(headers, leagues_from_login):
+    if leagues_from_login:
+        return leagues_from_login
+
+    endpoints = [
+        f"{API_BASE_URL}/v4/user/leagues",
+        f"{API_BASE_URL}/leagues"
+    ]
+    for url in endpoints:
+        resp = fetch_with_retry(url, headers)
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            leagues = data if isinstance(data, list) else data.get("leagues", [])
+            if leagues:
+                return leagues
+    return []
 
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
@@ -83,75 +84,93 @@ def main():
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
-    # Liga holen
-    leagues = leagues_from_login
-    if not leagues:
-        resp = fetch_with_retry(f"{API_BASE_URL}/v4/user/leagues", headers)
-        if resp and resp.status_code == 200:
-            leagues_data = resp.json()
-            leagues = leagues_data if isinstance(leagues_data, list) else leagues_data.get("leagues", [])
-
-    if not leagues:
-        # Fallback auf v3 Endpunkt
-        resp = fetch_with_retry(f"{API_BASE_URL}/leagues", headers)
-        if resp and resp.status_code == 200:
-            leagues_data = resp.json()
-            leagues = leagues_data if isinstance(leagues_data, list) else leagues_data.get("leagues", [])
-
+    leagues = get_leagues(headers, leagues_from_login)
     if not leagues:
         print("Keine Liga gefunden.")
         return
 
     league_id = leagues[0].get("id")
-    print(f"Liga ID gefunden: {league_id}")
+    league_name = leagues[0].get("name", "Kickbase Liga")
 
-
-
-    # 1. Eigener Kader
+    # 1. KADER & MARKTWERT-TRENDS
     resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{user_id}/players", headers)
     squad_players = resp_squad.json().get("players", []) if resp_squad else []
 
-    squad_text = "--- DEIN KADER ---\n"
+    total_squad_value = 0
+    total_daily_change = 0
+    squad_lines = []
+
     for p in squad_players:
         name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name", "Spieler")
         mv = p.get("marketValue", 0)
         change = p.get("marketValueChange", 0)
-        squad_text += f"• {name}: {mv:,} € ({'+' if change >= 0 else ''}{change:,} €)\n"
+        total_squad_value += mv
+        total_daily_change += change
+        
+        trend = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+        squad_lines.append(f"  • {name}: {mv:,} € ({trend} {change:+,,} €)")
 
-    # 2. Transfermarkt
+    # 2. TRANSFERMARKT-ANALYSE
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
     mkt_players = resp_mkt.json().get("players", []) if resp_mkt else []
 
-    mkt_text = "\n--- TRANSFERMARKT ---\n"
+    mkt_lines = []
     for p in mkt_players:
         name = f"{p.get('firstName', '')} {p.get('lastName', '')}".strip() or p.get("name", "Spieler")
         price = p.get("price", 0)
         mv = p.get("marketValue", 0)
         seller = p.get("sellerName", "Kickbase")
-        mkt_text += f"• {name} | Preis: {price:,} € | MV: {mv:,} € | Verkäufer: {seller}\n"
+        diff = price - mv
+        diff_str = f"({diff:+,,} € zum MV)" if diff != 0 else "(Marktwert)"
+        
+        mkt_lines.append(f"  • {name} | Preis: {price:,} € {diff_str} | Verkäufer: {seller}")
 
-    # 3. Manager Budgets
+    # 3. LIGA-MANAGER & BUDGET-SCHÄTZUNG
     resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
     users = resp_users.json().get("users", []) if resp_users else []
 
-    budget_text = "\n--- LIGA MANAGER ---\n"
+    budget_lines = []
     for u in users:
         u_name = u.get("name", "Manager")
         team_val = u.get("teamValue", 0)
         budget = u.get("budget", 0)
-        budget_text += f"• {u_name} | Teamwert: {team_val:,} € | Geschätztes Budget: {budget:,} €\n"
+        points = u.get("points", 0)
+        budget_lines.append(f"  • {u_name} | Punkte: {points:,} | Teamwert: {team_val:,} € | Geschätztes Budget: {budget:,} €")
 
-    # E-Mail Zusammenbau
-    full_email_body = f"Moin Julian,\n\nhier ist dein aktuelles Kickbase Update:\n\n"
-    full_email_body += squad_text + mkt_text + budget_text + "\nViel Erfolg heute!"
+    # E-MAIL SUMMARY FORMATIERUNG
+    email_body = f"""Moin Julian,
 
-    # E-Mail Versand
+hier ist dein tägliches Kickbase Update für die Liga "{league_name}":
+
+========================================
+1. KADER-ÜBERSICHT & PROGNOSE
+========================================
+Gesamtwert Kader: {total_squad_value:,} €
+Tagesveränderung: {total_daily_change:+,,} €
+
+Einzelwerte:
+""" + "\n".join(squad_lines) + f"""
+
+========================================
+2. TRANSFERMARKT
+========================================
+""" + ("\n".join(mkt_lines) if mkt_lines else "  Keine Spieler auf dem Transfermarkt.") + f"""
+
+========================================
+3. LIGA-TABELLE & FINANZEN
+========================================
+""" + "\n".join(budget_lines) + """
+
+Viel Erfolg auf dem Transfermarkt!
+"""
+
+    # E-MAIL VERSAND
     if SMTP_USER and SMTP_PASSWORD:
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = EMAIL_TO
-        msg['Subject'] = "Dein tägliches Kickbase Update"
-        msg.attach(MIMEText(full_email_body, 'plain', 'utf-8'))
+        msg['Subject'] = f" Kickbase Update: {total_daily_change:+,,} € heute"
+        msg.attach(MIMEText(email_body, 'plain', 'utf-8'))
 
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
