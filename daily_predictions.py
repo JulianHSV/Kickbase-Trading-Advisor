@@ -64,14 +64,23 @@ def main():
     headers = BASE_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
 
-    # Liga holen
+        # Liga holen (v4 kompatibel)
     resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues", headers)
-    leagues = resp.json().get("leagues", []) if resp else []
+    leagues_data = resp.json() if resp else {}
+    
+    # In v4 kann die Antwort entweder eine Liste oder ein Dictionary mit "leagues" sein
+    if isinstance(leagues_data, list):
+        leagues = leagues_data
+    else:
+        leagues = leagues_data.get("leagues", [])
+        
     if not leagues:
-        print("Keine Liga gefunden.")
+        print("Keine Liga gefunden. API-Antwort:", leagues_data)
         return
     
     league_id = leagues[0].get("id")
+    print(f"Liga erfolgreich gefunden: {league_id}")
+
 
     # 1. Eigener Kader
     resp_squad = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{user_id}/players", headers)
