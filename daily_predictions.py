@@ -29,7 +29,6 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-# Team-ID Mapping für Klarnamen
 TEAMS = {
     "2": "Bayern", "3": "Dortmund", "4": "RB Leipzig", "5": "Leverkusen",
     "6": "Wolfsburg", "7": "Gladbach", "8": "Bremen", "9": "Stuttgart",
@@ -77,20 +76,31 @@ def login():
     leagues = data.get("lins") or []
     return token, user_id, leagues
 
-def get_player_prediction(league_id, player_id, headers):
-    """Holt Marktwert und echten Zuwachs aus der Detail-API."""
+def get_player_prediction_v4(league_id, player_id, headers):
+    """Berechnet den echten Euro-Zuwachs & Target aus dem Verlauf (mh) der v4 API."""
     resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
     if not resp or resp.status_code != 200:
         return 0, 0, 0
     
-    p_detail = resp.json()
-    mv = p_detail.get("mv") or p_detail.get("marketValue") or 0
+    p = resp.json()
+    mv = p.get("mv") or p.get("marketValue") or 0
     
-    # Marktwertveränderung aus v4 parsen
-    change_yesterday = p_detail.get("mvc") or p_detail.get("marketValueChange") or p_detail.get("mvt") or 0
-    
-    # Trendberechnung
-    predicted_target = change_yesterday
+    change_yesterday = 0
+    # Die v4 API speichert die Kurs-Historie im Array 'mh' (market history)
+    mh = p.get("mh") or []
+    if len(mh) >= 2:
+        # Differenz der letzten beiden Tageswerte
+        mv_today = mh[-1].get("m") or mh[-1].get("v") or mv
+        mv_yesterday = mh[-2].get("m") or mh[-2].get("v") or mv_today
+        change_yesterday = mv_today - mv_yesterday
+    else:
+        # Fallback falls 'mvc' doch als Euro-Betrag geliefert wird
+        raw_mvc = p.get("mvc", 0)
+        if abs(raw_mvc) > 100:  # Gültiger Euro-Betrag, kein Status-Code (1/2)
+            change_yesterday = raw_mvc
+
+    # Vorhersage-Berechnung analog zum ursprünglichen Modell
+    predicted_target = int(change_yesterday * 0.92) if change_yesterday > 0 else 0
 
     return mv, change_yesterday, predicted_target
 
@@ -109,16 +119,22 @@ def main():
     first_league = leagues[0]
     league_id = first_league.get("i") or first_league.get("id")
 
-    # 1. MANAGER BUDGETS (v4 Endpunkt: /users)
-    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
+    # 1. MANAGER BUDGETS (Verbindung von ranking & users)
     budget_data = []
+    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
+    if not resp_users or resp_users.status_code != 200:
+        resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
+
     if resp_users and resp_users.status_code == 200:
-        users = resp_users.json().get("users", []) or resp_users.json().get("it", []) or resp_users.json().get("u", [])
+        raw_json = resp_users.json()
+        users = raw_json.get("it") or raw_json.get("users") or raw_json.get("u") or []
         for u in users:
             name = u.get("n") or u.get("name", "Manager")
             budget = u.get("b") or u.get("budget", 0)
             team_val = u.get("tv") or u.get("teamValue", 0)
-            max_neg = int(-team_val * 0.33)
+            
+            # Falls das Budget nicht im Ranking enthalten ist, Näherung verwenden
+            max_neg = int(-team_val * 0.33) if team_val else 0
             avail = budget - max_neg
             
             budget_data.append({
@@ -133,7 +149,7 @@ def main():
 
     # 2. CURRENT MARKET PREDICTIONS
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
-    market_data = []
+    market_rows = []
     if resp_mkt and resp_mkt.status_code == 200:
         mkt_players = resp_mkt.json().get("it", []) or resp_mkt.json().get("players", [])
         for p in mkt_players:
@@ -142,26 +158,34 @@ def main():
             tid = str(p.get("tid") or p.get("teamId", ""))
             team_name = TEAMS.get(tid, tid)
             
-            mv, change_yesterday, pred_target = get_player_prediction(league_id, p_id, headers)
+            mv, change_yesterday, pred_target = get_player_prediction_v4(league_id, p_id, headers)
             if mv == 0:
                 mv = p.get("mv", 0)
 
-            market_data.append({
-                "last_name": last_name,
-                "team_name": team_name,
-                "mv": fmt_de(mv),
-                "mv_change_yesterday": fmt_de(change_yesterday),
-                "predicted_mv_target": fmt_de(pred_target),
-                "s_11_prob": "None",
-                "hours_to_exp": "NaN",
-                "expiring_today": False
-            })
+            # Nur Spieler mit positivem Zuwachs aufnehmen (wie in der Referenz)
+            if change_yesterday > 0:
+                market_rows.append({
+                    "last_name": last_name,
+                    "team_name": team_name,
+                    "mv_raw": mv,
+                    "mv": fmt_de(mv),
+                    "change_raw": change_yesterday,
+                    "mv_change_yesterday": fmt_de(change_yesterday),
+                    "predicted_mv_target": fmt_de(pred_target),
+                    "s_11_prob": "None",
+                    "hours_to_exp": "NaN",
+                    "expiring_today": False
+                })
 
-    df_market = pd.DataFrame(market_data)
+    df_market = pd.DataFrame(market_rows)
+    if not df_market.empty:
+        # Sortieren nach dem höchsten gestrigen Gewinn
+        df_market = df_market.sort_values(by="change_raw", ascending=False)
+        df_market = df_market.drop(columns=["mv_raw", "change_raw"])
 
     # 3. SQUAD PREDICTIONS
     resp_lineup = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/lineup", headers)
-    squad_data = []
+    squad_rows = []
     if resp_lineup and resp_lineup.status_code == 200:
         squad_players = resp_lineup.json().get("it", []) or resp_lineup.json().get("players", [])
         for p in squad_players:
@@ -170,20 +194,24 @@ def main():
             tid = str(p.get("tid") or p.get("teamId", ""))
             team_name = TEAMS.get(tid, tid)
             
-            mv, change_yesterday, pred_target = get_player_prediction(league_id, p_id, headers)
+            mv, change_yesterday, pred_target = get_player_prediction_v4(league_id, p_id, headers)
 
-            squad_data.append({
+            squad_rows.append({
                 "last_name": last_name,
                 "team_name": team_name,
                 "mv": fmt_de(mv),
+                "change_raw": change_yesterday,
                 "mv_change_yesterday": fmt_de(change_yesterday),
                 "predicted_mv_target": fmt_de(pred_target),
                 "s_11_prob": "NaN"
             })
 
-    df_squad = pd.DataFrame(squad_data)
+    df_squad = pd.DataFrame(squad_rows)
+    if not df_squad.empty:
+        df_squad = df_squad.sort_values(by="change_raw", ascending=False)
+        df_squad = df_squad.drop(columns=["change_raw"])
 
-    # HTML REPORT ERSTELLEN
+    # HTML TEMPLATE (Exaktes Layout laut Dunkelmodus-Referenz)
     today_str = datetime.now().strftime("%d-%m-%Y")
     
     html_content = f"""
@@ -222,7 +250,6 @@ def main():
     </html>
     """
 
-    # EMAIL VERSAND
     if SMTP_USER and SMTP_PASSWORD:
         msg = MIMEMultipart("alternative")
         msg['From'] = SMTP_USER
@@ -235,7 +262,7 @@ def main():
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("HTML-Report erfolgreich versendet!")
+        print("Report erfolgreich versendet!")
 
 if __name__ == "__main__":
     main()
