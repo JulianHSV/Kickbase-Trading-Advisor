@@ -265,4 +265,3 @@ def main():
         print("Report erfolgreich versendet!")
 
 if __name__ == "__main__":
-    main()
