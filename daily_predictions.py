@@ -83,34 +83,44 @@ def extract_history_val(item):
         return int(item)
     return 0
 
-def get_player_details(league_id, player_id, headers):
-    # Endpunkt 1: Ligabezogener Spielerdetail-Endpunkt
-    url = f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}"
-    resp = fetch_with_retry(url, headers)
+def get_player_details(league_id, player_id, headers, debug=False):
+    urls = [
+        f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}",
+        f"{API_BASE_URL}/v4/players/{player_id}",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/market/{player_id}"
+    ]
     
-    # Fallback Endpunkt 2: Globaler Spielerdetail-Endpunkt
-    if not resp or resp.status_code != 200:
-        url = f"{API_BASE_URL}/v4/players/{player_id}"
+    resp = None
+    for url in urls:
         resp = fetch_with_retry(url, headers)
+        if resp and resp.status_code == 200:
+            break
 
     if not resp or resp.status_code != 200:
         return 0, 0, 0, "Unbekannt"
     
     data = resp.json()
+    
+    # Im Debug-Modus das Roh-JSON im Log ausgeben
+    if debug:
+        print(f"\n--- DEBUG JSON FOR PLAYER {player_id} ---")
+        print(data)
+        print("-------------------------------------------\n")
+
     p = data.get("p") if isinstance(data.get("p"), dict) else data
     
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
     change = 0
-    # Priorität 1: Direkte Änderungswerte im Spielerobjekt prüfen (mvc, mvt, marketValueChange)
-    for field in ["mvc", "mvt", "marketValueChange", "dayChange", "c"]:
-        val = parse_num(p.get(field))
-        if abs(val) > 50:  # Echtes Bargeld, keine Tendenz-IDs
-            change = val
-            break
+    # Suche rekursiv/breit nach Keys für Änderungen
+    for key in ["mvc", "mvt", "marketValueChange", "dayChange", "c", "change", "delta"]:
+        if key in p:
+            val = parse_num(p[key])
+            if abs(val) > 50:
+                change = val
+                break
 
-    # Priorität 2: Historie-Array durchsuchen
     if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or p.get("h") or []
         if isinstance(mh, list) and len(mh) >= 2:
@@ -170,15 +180,16 @@ def main():
     market_rows = []
     if resp_mkt and resp_mkt.status_code == 200:
         mkt_players = resp_mkt.json().get("it") or resp_mkt.json().get("players") or []
-        for p in mkt_players:
+        for idx, p in enumerate(mkt_players):
             p_id = p.get("i") or p.get("id")
             last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
             
-            # Markt-Objekt liefert oft direkt den Wert im Feld 'mv' und das Team
             mv_base = parse_num(p.get("mv"))
             team_base = p.get("tn") or p.get("teamName") or "Unbekannt"
             
-            mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
+            # Beim ersten Spieler Debug-Output aktivieren
+            is_first = (idx == 0)
+            mv, change, pred, team_name = get_player_details(league_id, p_id, headers, debug=is_first)
             
             if mv == 0:
                 mv = mv_base
@@ -214,7 +225,7 @@ def main():
             mv_base = parse_num(p.get("mv"))
             team_base = p.get("tn") or p.get("teamName") or "Unbekannt"
             
-            mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
+            mv, change, pred, team_name = get_player_details(league_id, p_id, headers, debug=False)
             
             if mv == 0:
                 mv = mv_base
