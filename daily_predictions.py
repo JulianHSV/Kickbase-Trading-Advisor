@@ -28,14 +28,6 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-TEAMS = {
-    "2": "Bayern", "3": "Dortmund", "4": "RB Leipzig", "5": "Leverkusen",
-    "6": "Wolfsburg", "7": "Gladbach", "8": "Bremen", "9": "Stuttgart",
-    "10": "Frankfurt", "13": "Augsburg", "14": "Hoffenheim", "15": "Mainz",
-    "18": "Freiburg", "28": "Köln", "29": "Heidenheim", "40": "Union Berlin",
-    "42": "St. Pauli", "43": "Holstein Kiel"
-}
-
 def fmt_de(val):
     if pd.isna(val) or val is None:
         return "0"
@@ -75,16 +67,27 @@ def login():
     leagues = data.get("lins") or []
     return token, user_id, leagues
 
-def get_player_data(league_id, player_id, headers):
+def get_player_full_details(league_id, player_id, headers):
+    """Holt echte Marktwerte, echten Teamnamen und berechnet die Prognose."""
     resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
     if not resp or resp.status_code != 200:
-        return 0, 0, 0
+        return 0, 0, 0, ""
     
     p = resp.json()
     mv = p.get("mv") or p.get("marketValue") or 0
+    team_name = p.get("tn") or p.get("teamName") or p.get("t") or ""
+    
+    # Echten Zuwachs aus mvc oder mh (Historie) ermitteln
     change = p.get("mvc") or p.get("marketValueChange") or 0
-    pred = int(change * 0.92) if change > 0 else 0
-    return mv, change, pred
+    if change == 0:
+        mh = p.get("mh") or []
+        if len(mh) >= 2:
+            v_today = mh[-1].get("m") or mh[-1].get("v") or 0
+            v_yest = mh[-2].get("m") or mh[-2].get("v") or 0
+            change = v_today - v_yest
+            
+    pred_target = int(change * 0.92) if change > 0 else 0
+    return mv, change, pred_target, team_name
 
 def main():
     if not KB_EMAIL or not KB_PASSWORD:
@@ -103,13 +106,10 @@ def main():
 
     # 1. MANAGER BUDGETS
     budget_data = []
-    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
-    if not resp_users or resp_users.status_code != 200:
-        resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
-
+    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
     if resp_users and resp_users.status_code == 200:
         raw = resp_users.json()
-        users = raw.get("users") or raw.get("it") or raw.get("u") or []
+        users = raw.get("u") or raw.get("users") or raw.get("it") or []
         for u in users:
             name = u.get("n") or u.get("name", "Manager")
             budget = u.get("b") or u.get("budget") or 0
@@ -135,10 +135,10 @@ def main():
         for p in mkt_players:
             p_id = p.get("i") or p.get("id")
             last_name = p.get("n") or p.get("lastName", "")
-            tid = str(p.get("tid") or p.get("teamId", ""))
-            team_name = TEAMS.get(tid, tid)
             
-            mv, change, pred = get_player_data(league_id, p_id, headers)
+            mv, change, pred, team_name = get_player_full_details(league_id, p_id, headers)
+            if not team_name:
+                team_name = p.get("tn") or p.get("teamName") or "Unbekannt"
             if mv == 0:
                 mv = p.get("mv", 0)
 
@@ -167,10 +167,10 @@ def main():
         for p in squad_players:
             p_id = p.get("i") or p.get("id")
             last_name = p.get("n") or p.get("lastName", "")
-            tid = str(p.get("tid") or p.get("teamId", ""))
-            team_name = TEAMS.get(tid, tid)
             
-            mv, change, pred = get_player_data(league_id, p_id, headers)
+            mv, change, pred, team_name = get_player_full_details(league_id, p_id, headers)
+            if not team_name:
+                team_name = p.get("tn") or p.get("teamName") or "Unbekannt"
 
             squad_rows.append({
                 "last_name": last_name,
