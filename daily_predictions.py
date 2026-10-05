@@ -67,43 +67,36 @@ def login():
     leagues = data.get("lins") or []
     return token, user_id, leagues
 
-def parse_val(val):
+def parse_num(val):
     if isinstance(val, dict):
         return val.get("v") or val.get("m") or val.get("amount") or 0
     if isinstance(val, (int, float)):
         return int(val)
+    if isinstance(val, str) and val.isdigit():
+        return int(val)
     return 0
 
-def extract_history_value(item):
-    if isinstance(item, dict):
-        return item.get("v") or item.get("mv") or item.get("val") or item.get("m") or 0
-    if isinstance(item, (int, float)):
-        return int(item)
-    return 0
-
-def get_player_full_details(league_id, player_id, headers):
-    resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
-    if not resp or resp.status_code != 200:
-        return 0, 0, 0, ""
+def extract_player_data(p):
+    last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
+    team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    p = resp.json()
-    mv = parse_val(p.get("mv") or p.get("marketValue"))
-    team_name = p.get("tn") or p.get("teamName") or p.get("t") or ""
+    mv = parse_num(p.get("mv") or p.get("marketValue"))
     
-    # 1. Direktes Änderungssignal aus v4
-    change = parse_val(p.get("mvc") or p.get("marketValueChange") or p.get("mvt"))
+    # Versuche den Tageszuwachs direkt zu lesen
+    change = parse_num(p.get("mvc") or p.get("marketValueChange") or p.get("mvt") or p.get("d"))
     
-    # 2. Falls 0 oder ungültig (Einsen/Zweien), Marktverlauf (mh) auslesen
-    if change == 0 or abs(change) < 10:
+    # Fallback: Falls mvc nicht da ist, aus mh (Market History) rechnen
+    if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or []
         if isinstance(mh, list) and len(mh) >= 2:
-            v_today = extract_history_value(mh[-1])
-            v_yesterday = extract_history_value(mh[-2])
-            if v_today and v_yesterday:
-                change = v_today - v_yesterday
+            v1 = parse_num(mh[-1])
+            v2 = parse_num(mh[-2])
+            if v1 and v2:
+                change = v1 - v2
 
     pred_target = int(change * 0.92) if change > 0 else 0
-    return mv, change, pred_target, team_name
+    
+    return last_name, team_name, mv, change, pred_target
 
 def main():
     print("Starte Kickbase Report...")
@@ -133,9 +126,9 @@ def main():
         users = raw.get("users") or raw.get("u") or raw.get("it") or []
         for u in users:
             name = u.get("n") or u.get("name") or u.get("userName", "Manager")
-            budget = parse_val(u.get("b") or u.get("budget"))
-            team_val = parse_val(u.get("tv") or u.get("teamValue"))
-            max_neg = parse_val(u.get("mneg")) if "mneg" in u else int(-team_val * 0.33)
+            budget = parse_num(u.get("b") or u.get("budget"))
+            team_val = parse_num(u.get("tv") or u.get("teamValue"))
+            max_neg = parse_num(u.get("mneg")) if "mneg" in u else int(-team_val * 0.33)
             avail = budget - max_neg
             
             budget_data.append({
@@ -153,15 +146,14 @@ def main():
     market_rows = []
     if resp_mkt and resp_mkt.status_code == 200:
         mkt_players = resp_mkt.json().get("it") or resp_mkt.json().get("players") or []
+        
+        # Debug-Logging des ersten Spielers
+        if mkt_players:
+            print("=== MARKET PLAYER KEYS ===", list(mkt_players[0].keys()))
+            print("=== SAMPLE PLAYER DATA ===", mkt_players[0])
+
         for p in mkt_players:
-            p_id = p.get("i") or p.get("id")
-            last_name = p.get("n") or p.get("lastName", "")
-            
-            mv, change, pred, team_name = get_player_full_details(league_id, p_id, headers)
-            if not team_name:
-                team_name = p.get("tn") or p.get("teamName") or "Unbekannt"
-            if mv == 0:
-                mv = parse_val(p.get("mv"))
+            last_name, team_name, mv, change, pred = extract_player_data(p)
 
             market_rows.append({
                 "last_name": last_name,
@@ -186,12 +178,7 @@ def main():
     if resp_lineup and resp_lineup.status_code == 200:
         squad_players = resp_lineup.json().get("it") or resp_lineup.json().get("players") or []
         for p in squad_players:
-            p_id = p.get("i") or p.get("id")
-            last_name = p.get("n") or p.get("lastName", "")
-            
-            mv, change, pred, team_name = get_player_full_details(league_id, p_id, headers)
-            if not team_name:
-                team_name = p.get("tn") or p.get("teamName") or "Unbekannt"
+            last_name, team_name, mv, change, pred = extract_player_data(p)
 
             squad_rows.append({
                 "last_name": last_name,
