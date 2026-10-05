@@ -77,7 +77,6 @@ def parse_num(val):
     return 0
 
 def extract_history_val(item):
-    """Liest aus einem Historieneintrag den Wert aus, egal ob Dict oder Zahl."""
     if isinstance(item, dict):
         return parse_num(item.get("mv") or item.get("v") or item.get("val") or item.get("m"))
     if isinstance(item, (int, float)):
@@ -85,8 +84,15 @@ def extract_history_val(item):
     return 0
 
 def get_player_details(league_id, player_id, headers):
+    # Endpunkt 1: Ligabezogener Spielerdetail-Endpunkt
     url = f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}"
     resp = fetch_with_retry(url, headers)
+    
+    # Fallback Endpunkt 2: Globaler Spielerdetail-Endpunkt
+    if not resp or resp.status_code != 200:
+        url = f"{API_BASE_URL}/v4/players/{player_id}"
+        resp = fetch_with_retry(url, headers)
+
     if not resp or resp.status_code != 200:
         return 0, 0, 0, "Unbekannt"
     
@@ -97,19 +103,21 @@ def get_player_details(league_id, player_id, headers):
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
     change = 0
-    # 1. Versuche die Marktwert-Historie (mh) auszulesen (letzter Tag minus vorletzter Tag)
-    mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or []
-    if isinstance(mh, list) and len(mh) >= 2:
-        v_today = extract_history_val(mh[-1])
-        v_yesterday = extract_history_val(mh[-2])
-        if v_today and v_yesterday:
-            change = v_today - v_yesterday
+    # Priorität 1: Direkte Änderungswerte im Spielerobjekt prüfen (mvc, mvt, marketValueChange)
+    for field in ["mvc", "mvt", "marketValueChange", "dayChange", "c"]:
+        val = parse_num(p.get(field))
+        if abs(val) > 50:  # Echtes Bargeld, keine Tendenz-IDs
+            change = val
+            break
 
-    # 2. Fallback: Falls mh leer ist, direkte Betrags-Felder prüfen (nur Werte > 50 Euro zulassen)
+    # Priorität 2: Historie-Array durchsuchen
     if change == 0:
-        raw_change = parse_num(p.get("mvc") or p.get("marketValueChange") or p.get("mvt"))
-        if abs(raw_change) > 50:
-            change = raw_change
+        mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or p.get("h") or []
+        if isinstance(mh, list) and len(mh) >= 2:
+            v_today = extract_history_val(mh[-1])
+            v_yesterday = extract_history_val(mh[-2])
+            if v_today and v_yesterday:
+                change = v_today - v_yesterday
 
     pred = int(change * 0.92) if change > 0 else 0
     return mv, change, pred, team_name
@@ -166,9 +174,16 @@ def main():
             p_id = p.get("i") or p.get("id")
             last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
             
+            # Markt-Objekt liefert oft direkt den Wert im Feld 'mv' und das Team
+            mv_base = parse_num(p.get("mv"))
+            team_base = p.get("tn") or p.get("teamName") or "Unbekannt"
+            
             mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
+            
             if mv == 0:
-                mv = parse_num(p.get("mv"))
+                mv = mv_base
+            if team_name == "Unbekannt":
+                team_name = team_base
 
             market_rows.append({
                 "last_name": last_name,
@@ -196,9 +211,15 @@ def main():
             p_id = p.get("i") or p.get("id")
             last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
             
+            mv_base = parse_num(p.get("mv"))
+            team_base = p.get("tn") or p.get("teamName") or "Unbekannt"
+            
             mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
+            
             if mv == 0:
-                mv = parse_num(p.get("mv"))
+                mv = mv_base
+            if team_name == "Unbekannt":
+                team_name = team_base
 
             squad_rows.append({
                 "last_name": last_name,
