@@ -141,41 +141,43 @@ def main():
     league_id = first_league.get("i") or first_league.get("id")
     print(f"Liga ID: {league_id}")
 
-    # 1. MANAGER BUDGETS / LEAGUE USERS
+    # 1. MANAGER BUDGETS
     budget_data = []
     
-    # Versuche verschiedene v4 Endpoints für Ligamitglieder
-    ranking_urls = [
-        f"{API_BASE_URL}/v4/leagues/{league_id}/ranking",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/users",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/table"
-    ]
-    
-    users = []
-    for r_url in ranking_urls:
-        resp_users = fetch_with_retry(r_url, headers)
-        if resp_users and resp_users.status_code == 200:
-            raw = resp_users.json()
-            users = raw.get("users") or raw.get("u") or raw.get("it") or raw.get("ranking") or []
-            if users:
-                break
+    # Abfrage für das Ranking/User der Liga
+    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
+    if not resp_users or resp_users.status_code != 200:
+        resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
 
-    for u in users:
-        name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
-        budget = parse_num(u.get("b") or u.get("budget"))
-        team_val = parse_num(u.get("tv") or u.get("teamValue"))
+    if resp_users and resp_users.status_code == 200:
+        raw = resp_users.json()
         
-        # Max Negative & Verfügbares Budget berechnen
-        max_neg = parse_num(u.get("mneg")) if "mneg" in u else int(-team_val * 0.33)
-        avail = budget - max_neg if budget != 0 else 0
-        
-        budget_data.append({
-            "User": name,
-            "Budget": fmt_de(budget),
-            "Team Value": fmt_de(team_val),
-            "Max Negative": fmt_de(max_neg),
-            "Available Budget": fmt_de(avail)
-        })
+        # In v4 können User in "u", "users", "items" oder "ranking" stecken
+        users = []
+        if isinstance(raw, list):
+            users = raw
+        elif isinstance(raw, dict):
+            users = raw.get("u") or raw.get("users") or raw.get("items") or raw.get("ranking") or raw.get("it") or []
+
+        for u in users:
+            if not isinstance(u, dict):
+                continue
+                
+            name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
+            budget = parse_num(u.get("b") or u.get("budget"))
+            team_val = parse_num(u.get("tv") or u.get("teamValue"))
+            
+            # Falls mneg nicht explizit dabei ist, berechnen wir 33% vom Teamwert
+            max_neg = parse_num(u.get("mneg")) if "mneg" in u else int(-team_val * 0.33)
+            avail = budget - max_neg if budget != 0 else 0
+            
+            budget_data.append({
+                "User": name,
+                "Budget": fmt_de(budget),
+                "Team Value": fmt_de(team_val),
+                "Max Negative": fmt_de(max_neg),
+                "Available Budget": fmt_de(avail)
+            })
 
     df_budgets = pd.DataFrame(budget_data)
 
