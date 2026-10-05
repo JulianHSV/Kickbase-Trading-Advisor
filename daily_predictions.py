@@ -83,11 +83,10 @@ def extract_history_val(item):
         return int(item)
     return 0
 
-def get_player_details(league_id, player_id, headers, debug=False):
+def get_player_details(league_id, player_id, headers):
     urls = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}",
-        f"{API_BASE_URL}/v4/players/{player_id}",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/market/{player_id}"
+        f"{API_BASE_URL}/v4/players/{player_id}"
     ]
     
     resp = None
@@ -100,26 +99,22 @@ def get_player_details(league_id, player_id, headers, debug=False):
         return 0, 0, 0, "Unbekannt"
     
     data = resp.json()
-    
-    # Im Debug-Modus das Roh-JSON im Log ausgeben
-    if debug:
-        print(f"\n--- DEBUG JSON FOR PLAYER {player_id} ---")
-        print(data)
-        print("-------------------------------------------\n")
-
     p = data.get("p") if isinstance(data.get("p"), dict) else data
     
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    change = 0
-    # Suche rekursiv/breit nach Keys für Änderungen
-    for key in ["mvc", "mvt", "marketValueChange", "dayChange", "c", "change", "delta"]:
-        if key in p:
-            val = parse_num(p[key])
-            if abs(val) > 50:
-                change = val
-                break
+    # Der entscheidende v4-Key für den 24h-Marktwertzuwachs in Euro: tfhmvt
+    change = parse_num(p.get("tfhmvt"))
+    
+    # Fallback falls tfhmvt nicht existiert
+    if change == 0:
+        for key in ["mvc", "marketValueChange", "dayChange", "delta"]:
+            if key in p:
+                val = parse_num(p[key])
+                if abs(val) > 50:
+                    change = val
+                    break
 
     if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or p.get("h") or []
@@ -180,16 +175,14 @@ def main():
     market_rows = []
     if resp_mkt and resp_mkt.status_code == 200:
         mkt_players = resp_mkt.json().get("it") or resp_mkt.json().get("players") or []
-        for idx, p in enumerate(mkt_players):
+        for p in mkt_players:
             p_id = p.get("i") or p.get("id")
             last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
             
             mv_base = parse_num(p.get("mv"))
             team_base = p.get("tn") or p.get("teamName") or "Unbekannt"
             
-            # Beim ersten Spieler Debug-Output aktivieren
-            is_first = (idx == 0)
-            mv, change, pred, team_name = get_player_details(league_id, p_id, headers, debug=is_first)
+            mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
             
             if mv == 0:
                 mv = mv_base
@@ -225,7 +218,7 @@ def main():
             mv_base = parse_num(p.get("mv"))
             team_base = p.get("tn") or p.get("teamName") or "Unbekannt"
             
-            mv, change, pred, team_name = get_player_details(league_id, p_id, headers, debug=False)
+            mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
             
             if mv == 0:
                 mv = mv_base
