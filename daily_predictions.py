@@ -104,10 +104,8 @@ def get_player_details(league_id, player_id, headers):
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # Der entscheidende v4-Key für den 24h-Marktwertzuwachs in Euro: tfhmvt
     change = parse_num(p.get("tfhmvt"))
     
-    # Fallback falls tfhmvt nicht existiert
     if change == 0:
         for key in ["mvc", "marketValueChange", "dayChange", "delta"]:
             if key in p:
@@ -124,7 +122,7 @@ def get_player_details(league_id, player_id, headers):
             if v_today and v_yesterday:
                 change = v_today - v_yesterday
 
-    pred = int(change * 0.92) if change > 0 else 0
+    pred = int(change * 0.92)
     return mv, change, pred, team_name
 
 def main():
