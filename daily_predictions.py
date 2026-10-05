@@ -69,11 +69,19 @@ def login():
 
 def parse_num(val):
     if isinstance(val, dict):
-        return val.get("v") or val.get("mv") or val.get("m") or val.get("amount") or 0
+        return val.get("mv") or val.get("v") or val.get("val") or val.get("m") or val.get("amount") or 0
     if isinstance(val, (int, float)):
         return int(val)
     if isinstance(val, str) and val.replace("-", "").isdigit():
         return int(val)
+    return 0
+
+def extract_history_val(item):
+    """Liest aus einem Historieneintrag den Wert aus, egal ob Dict oder Zahl."""
+    if isinstance(item, dict):
+        return parse_num(item.get("mv") or item.get("v") or item.get("val") or item.get("m"))
+    if isinstance(item, (int, float)):
+        return int(item)
     return 0
 
 def get_player_details(league_id, player_id, headers):
@@ -83,24 +91,26 @@ def get_player_details(league_id, player_id, headers):
         return 0, 0, 0, "Unbekannt"
     
     data = resp.json()
-    # In v4 liegt der Spieler oft im Key 'p' oder direkt in 'data'
     p = data.get("p") if isinstance(data.get("p"), dict) else data
     
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # 1. Direktes Feld
-    change = parse_num(p.get("mvc") or p.get("marketValueChange") or p.get("mvt"))
-    
-    # 2. Fallback: Verlaufsliste (mh = Market History)
+    change = 0
+    # 1. Versuche die Marktwert-Historie (mh) auszulesen (letzter Tag minus vorletzter Tag)
+    mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or []
+    if isinstance(mh, list) and len(mh) >= 2:
+        v_today = extract_history_val(mh[-1])
+        v_yesterday = extract_history_val(mh[-2])
+        if v_today and v_yesterday:
+            change = v_today - v_yesterday
+
+    # 2. Fallback: Falls mh leer ist, direkte Betrags-Felder prüfen (nur Werte > 50 Euro zulassen)
     if change == 0:
-        mh = p.get("mh") or p.get("marketHistory") or []
-        if isinstance(mh, list) and len(mh) >= 2:
-            today_val = parse_num(mh[-1])
-            yest_val = parse_num(mh[-2])
-            if today_val and yest_val:
-                change = today_val - yest_val
-                
+        raw_change = parse_num(p.get("mvc") or p.get("marketValueChange") or p.get("mvt"))
+        if abs(raw_change) > 50:
+            change = raw_change
+
     pred = int(change * 0.92) if change > 0 else 0
     return mv, change, pred, team_name
 
