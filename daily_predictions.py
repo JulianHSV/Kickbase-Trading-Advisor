@@ -74,6 +74,13 @@ def parse_val(val):
         return int(val)
     return 0
 
+def extract_history_value(item):
+    if isinstance(item, dict):
+        return item.get("v") or item.get("mv") or item.get("val") or item.get("m") or 0
+    if isinstance(item, (int, float)):
+        return int(item)
+    return 0
+
 def get_player_full_details(league_id, player_id, headers):
     resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
     if not resp or resp.status_code != 200:
@@ -83,15 +90,15 @@ def get_player_full_details(league_id, player_id, headers):
     mv = parse_val(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or ""
     
-    # 1. Zuwachs aus direkten v4-Feldern
+    # 1. Direktes Änderungssignal aus v4
     change = parse_val(p.get("mvc") or p.get("marketValueChange") or p.get("mvt"))
     
-    # 2. Falls 0 oder ungültig, Verlauf aus mh (Market History) berechnen
-    if change == 0:
+    # 2. Falls 0 oder ungültig (Einsen/Zweien), Marktverlauf (mh) auslesen
+    if change == 0 or abs(change) < 10:
         mh = p.get("mh") or p.get("marketHistory") or []
         if isinstance(mh, list) and len(mh) >= 2:
-            v_today = parse_val(mh[-1])
-            v_yesterday = parse_val(mh[-2])
+            v_today = extract_history_value(mh[-1])
+            v_yesterday = extract_history_value(mh[-2])
             if v_today and v_yesterday:
                 change = v_today - v_yesterday
 
