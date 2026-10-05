@@ -69,34 +69,40 @@ def login():
 
 def parse_num(val):
     if isinstance(val, dict):
-        return val.get("v") or val.get("m") or val.get("amount") or 0
+        return val.get("v") or val.get("mv") or val.get("m") or val.get("amount") or 0
     if isinstance(val, (int, float)):
         return int(val)
-    if isinstance(val, str) and val.isdigit():
+    if isinstance(val, str) and val.replace("-", "").isdigit():
         return int(val)
     return 0
 
-def extract_player_data(p):
-    last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
-    team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
+def get_player_details(league_id, player_id, headers):
+    url = f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}"
+    resp = fetch_with_retry(url, headers)
+    if not resp or resp.status_code != 200:
+        return 0, 0, 0, "Unbekannt"
+    
+    data = resp.json()
+    # In v4 liegt der Spieler oft im Key 'p' oder direkt in 'data'
+    p = data.get("p") if isinstance(data.get("p"), dict) else data
     
     mv = parse_num(p.get("mv") or p.get("marketValue"))
+    team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # Versuche den Tageszuwachs direkt zu lesen
-    change = parse_num(p.get("mvc") or p.get("marketValueChange") or p.get("mvt") or p.get("d"))
+    # 1. Direktes Feld
+    change = parse_num(p.get("mvc") or p.get("marketValueChange") or p.get("mvt"))
     
-    # Fallback: Falls mvc nicht da ist, aus mh (Market History) rechnen
+    # 2. Fallback: Verlaufsliste (mh = Market History)
     if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or []
         if isinstance(mh, list) and len(mh) >= 2:
-            v1 = parse_num(mh[-1])
-            v2 = parse_num(mh[-2])
-            if v1 and v2:
-                change = v1 - v2
-
-    pred_target = int(change * 0.92) if change > 0 else 0
-    
-    return last_name, team_name, mv, change, pred_target
+            today_val = parse_num(mh[-1])
+            yest_val = parse_num(mh[-2])
+            if today_val and yest_val:
+                change = today_val - yest_val
+                
+    pred = int(change * 0.92) if change > 0 else 0
+    return mv, change, pred, team_name
 
 def main():
     print("Starte Kickbase Report...")
@@ -146,14 +152,13 @@ def main():
     market_rows = []
     if resp_mkt and resp_mkt.status_code == 200:
         mkt_players = resp_mkt.json().get("it") or resp_mkt.json().get("players") or []
-        
-        # Debug-Logging des ersten Spielers
-        if mkt_players:
-            print("=== MARKET PLAYER KEYS ===", list(mkt_players[0].keys()))
-            print("=== SAMPLE PLAYER DATA ===", mkt_players[0])
-
         for p in mkt_players:
-            last_name, team_name, mv, change, pred = extract_player_data(p)
+            p_id = p.get("i") or p.get("id")
+            last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
+            
+            mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
+            if mv == 0:
+                mv = parse_num(p.get("mv"))
 
             market_rows.append({
                 "last_name": last_name,
@@ -178,7 +183,12 @@ def main():
     if resp_lineup and resp_lineup.status_code == 200:
         squad_players = resp_lineup.json().get("it") or resp_lineup.json().get("players") or []
         for p in squad_players:
-            last_name, team_name, mv, change, pred = extract_player_data(p)
+            p_id = p.get("i") or p.get("id")
+            last_name = p.get("n") or p.get("lastName") or p.get("ln") or "Unbekannt"
+            
+            mv, change, pred, team_name = get_player_details(league_id, p_id, headers)
+            if mv == 0:
+                mv = parse_num(p.get("mv"))
 
             squad_rows.append({
                 "last_name": last_name,
