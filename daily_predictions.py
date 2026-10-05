@@ -67,25 +67,36 @@ def login():
     leagues = data.get("lins") or []
     return token, user_id, leagues
 
+def extract_numeric(val):
+    """Extrahiert einen reinen Zahlenwert, selbst wenn die API ein Dict schickt."""
+    if isinstance(val, dict):
+        return val.get("v") or val.get("m") or val.get("amount") or 0
+    if isinstance(val, (int, float)):
+        return val
+    return 0
+
 def get_player_full_details(league_id, player_id, headers):
-    """Holt echte Marktwerte, echten Teamnamen und berechnet die Prognose."""
+    """Liest die v4 Spielerdetails sauber aus und parst verschachtelte Strukturen."""
     resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}", headers)
     if not resp or resp.status_code != 200:
         return 0, 0, 0, ""
     
     p = resp.json()
-    mv = p.get("mv") or p.get("marketValue") or 0
+    mv = extract_numeric(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or ""
     
-    # Echten Zuwachs aus mvc oder mh (Historie) ermitteln
-    change = p.get("mvc") or p.get("marketValueChange") or 0
+    # 1. Zuwachs direkt aus mvc/marketValueChange parsen
+    change = extract_numeric(p.get("mvc") or p.get("marketValueChange"))
+    
+    # 2. Falls mvc 0 oder ein Dict war, Historie/Punkte-Array durchsuchen
     if change == 0:
-        mh = p.get("mh") or []
-        if len(mh) >= 2:
-            v_today = mh[-1].get("m") or mh[-1].get("v") or 0
-            v_yest = mh[-2].get("m") or mh[-2].get("v") or 0
-            change = v_today - v_yest
-            
+        mh = p.get("mh") or p.get("marketHistory") or []
+        if isinstance(mh, list) and len(mh) >= 2:
+            v_today = extract_numeric(mh[-1])
+            v_yest = extract_numeric(mh[-2])
+            if v_today and v_yest:
+                change = v_today - v_yest
+
     pred_target = int(change * 0.92) if change > 0 else 0
     return mv, change, pred_target, team_name
 
@@ -104,17 +115,21 @@ def main():
     first_league = leagues[0]
     league_id = first_league.get("i") or first_league.get("id")
 
-    # 1. MANAGER BUDGETS
+    # 1. MANAGER BUDGETS (Gezieltes Entpacken der Nutzerdaten)
     budget_data = []
-    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
+    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
+    if not resp_users or resp_users.status_code != 200:
+        resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
+
     if resp_users and resp_users.status_code == 200:
         raw = resp_users.json()
         users = raw.get("u") or raw.get("users") or raw.get("it") or []
         for u in users:
-            name = u.get("n") or u.get("name", "Manager")
-            budget = u.get("b") or u.get("budget") or 0
-            team_val = u.get("tv") or u.get("teamValue") or 0
-            max_neg = u.get("mneg") if u.get("mneg") is not None else int(-team_val * 0.33)
+            name = u.get("n") or u.get("name") or u.get("userName", "Manager")
+            budget = extract_numeric(u.get("b") or u.get("budget"))
+            team_val = extract_numeric(u.get("tv") or u.get("teamValue"))
+            
+            max_neg = extract_numeric(u.get("mneg")) if "mneg" in u else int(-team_val * 0.33)
             avail = budget - max_neg
             
             budget_data.append({
@@ -140,7 +155,7 @@ def main():
             if not team_name:
                 team_name = p.get("tn") or p.get("teamName") or "Unbekannt"
             if mv == 0:
-                mv = p.get("mv", 0)
+                mv = extract_numeric(p.get("mv"))
 
             market_rows.append({
                 "last_name": last_name,
