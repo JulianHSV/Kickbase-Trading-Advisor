@@ -32,7 +32,7 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-START_TOTAL_VALUE = 180000000  # 100M Baseline + 80M Start
+START_TOTAL_VALUE = 180000000  # 100M Baseline + 80M Start (180 Mio. Gesamtbudget zu Beginn)
 MAX_SQUAD_SIZE = 20
 
 
@@ -157,10 +157,73 @@ def get_player_details(league_id, player_id, headers):
 
 
 # ==========================================
-# MANAGER BUDGET & SQUAD CALCULATION
+# FULL HISTORICAL FEED & BUDGET CALCULATION
 # ==========================================
 
+def fetch_all_league_transfers(league_id, headers):
+    """
+    Durchläuft den gesamten Liga-Feed seit Beginn der Saison über Pagination,
+    um lückenlos ALLE Käufe und Verkäufe aller Manager aufzusummieren.
+    """
+    net_transfers = {}
+    player_counts = {}
+    
+    start_time = None
+    has_more = True
+    page = 0
+    max_pages = 50  # Bis zu 50 Seiten Feed abrufen (deckt Monate ab)
+
+    while has_more and page < max_pages:
+        page += 1
+        url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed"
+        if start_time:
+            url += f"?start={start_time}"
+            
+        resp = fetch_with_retry(url, headers)
+        if not resp or resp.status_code != 200:
+            break
+            
+        data = resp.json()
+        items = data.get("it") or data.get("items") or []
+        
+        if not items:
+            break
+            
+        for item in items:
+            item_type = item.get("t") or item.get("type")
+            u_id = str(item.get("uid") or item.get("userId") or item.get("u") or "")
+            amount = parse_num(item.get("a") or item.get("amount") or item.get("v") or item.get("p"))
+            
+            if not u_id:
+                continue
+
+            if u_id not in net_transfers:
+                net_transfers[u_id] = 0
+            if u_id not in player_counts:
+                player_counts[u_id] = 0
+
+            # Transfer-Typen: 12/buy = Kauf, 13/sell = Verkauf
+            if item_type in [12, "buy", "BUY"]:
+                if amount > 0:
+                    net_transfers[u_id] -= amount
+            elif item_type in [13, "sell", "SELL"]:
+                if amount > 0:
+                    net_transfers[u_id] += amount
+
+        # Pagination-Zeitstempel für den nächsten Aufruf setzen
+        last_item = items[-1]
+        start_time = last_item.get("dt") or last_item.get("date") or last_item.get("t")
+        
+        if not start_time or len(items) < 10:
+            has_more = False
+
+    return net_transfers
+
+
 def fetch_user_squad(league_id, u_id, headers):
+    """
+    Versucht über verschiedene Endpunkte die Spieleranzahl und den Kaderwert abzufragen.
+    """
     squad_endpoints = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/squad",
         f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/players",
@@ -178,7 +241,7 @@ def fetch_user_squad(league_id, u_id, headers):
                 players = data
                 break
             elif isinstance(data, dict):
-                team_val_direct = parse_num(data.get("tv") or data.get("teamValue") or data.get("v"))
+                team_val_direct = parse_num(data.get("tv") or data.get("teamValue") or data.get("v") or data.get("m"))
                 players = (
                     data.get("p") or 
                     data.get("players") or 
@@ -226,24 +289,9 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                 if users_raw:
                     break
 
-    feed_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/feed", headers)
-    net_transfers = {}
-    
-    if feed_resp and feed_resp.status_code == 200:
-        feed_data = feed_resp.json()
-        items = feed_data.get("it") or feed_data.get("items") or []
-        for item in items:
-            item_type = item.get("t") or item.get("type")
-            u_id = str(item.get("uid") or item.get("userId"))
-            amount = parse_num(item.get("a") or item.get("amount") or item.get("v"))
-            
-            if u_id and amount > 0:
-                if u_id not in net_transfers:
-                    net_transfers[u_id] = 0
-                if item_type in [12, "buy"]:
-                    net_transfers[u_id] -= amount
-                elif item_type in [13, "sell"]:
-                    net_transfers[u_id] += amount
+    # Sämtliche Netto-Transfers seit Ligastart durch den vollständigen Feed aufsummieren
+    print("Rufe vollständige Transfer-Historie der Liga ab...")
+    net_transfers = fetch_all_league_transfers(league_id, headers)
 
     budget_list = []
     for u in users_raw:
@@ -258,16 +306,17 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         if team_val == 0:
             team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
         if squad_count == 0:
-            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c") or u.get("squadSize"))
+            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c") or u.get("squadSize") or u.get("s"))
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
+        # Für den eigenen Account direkt das Budget nehmen, sonst berechnen:
+        # Formel: 180M Startkapital - Aktueller Kaderwert + Summe Aller Netto-Transfers
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
-            start_cash_estimate = max(0, START_TOTAL_VALUE - team_val)
             transfer_balance = net_transfers.get(u_id, 0)
-            est_cash = start_cash_estimate + transfer_balance
+            est_cash = (START_TOTAL_VALUE - team_val) + transfer_balance
 
         max_dispo = int(team_val * 0.33)
         max_available = est_cash + max_dispo
