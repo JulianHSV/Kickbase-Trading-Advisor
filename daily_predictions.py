@@ -8,11 +8,11 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
-load_dotenv()
+# ==========================================
+# ENVIRONMENT & CONFIGURATION
+# ==========================================
 
-# ==========================================
-# CONFIGURATION & ENVIRONMENT VARIABLES
-# ==========================================
+load_dotenv()
 
 KB_EMAIL = os.getenv("KB_EMAIL") or os.getenv("KICK_USER")
 KB_PASSWORD = os.getenv("KB_PASSWORD") or os.getenv("KICK_PASS")
@@ -32,12 +32,12 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-START_TOTAL_VALUE = 180000000  # 100M Baseline + 80M Start (180 Mio. Gesamtbudget zu Beginn)
+START_TOTAL_VALUE = 180000000  # 180 Mio. Euro Baseline
 MAX_SQUAD_SIZE = 20
 
 
 # ==========================================
-# HELPER FUNCTIONS
+# HELPER & UTILITY FUNCTIONS
 # ==========================================
 
 def fmt_de(val):
@@ -46,27 +46,55 @@ def fmt_de(val):
     try:
         val = float(val)
         return f"{val:,.0f}".replace(",", ".")
-    except Exception:
+    except Exception as e:
         return str(val)
+
+
+def parse_num(val):
+    if isinstance(val, dict):
+        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue"]:
+            if key in val and val[key] is not None:
+                return parse_num(val[key])
+        return 0
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str):
+        clean_str = val.replace("-", "").replace(".", "").replace(",", "").strip()
+        if clean_str.isdigit():
+            return int(clean_str)
+    return 0
+
+
+def extract_history_val(item):
+    if isinstance(item, dict):
+        return parse_num(item.get("mv") or item.get("v") or item.get("val") or item.get("m"))
+    if isinstance(item, (int, float)):
+        return int(item)
+    return 0
 
 
 def fetch_with_retry(url, headers, max_retries=3):
     for attempt in range(max_retries):
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = requests.get(url, headers=headers, timeout=12)
             if resp.status_code == 200:
                 return resp
             elif resp.status_code == 429:
+                print(f"[API WARN] Rate limit auf {url}. Warte {(attempt + 1) * 2} Sek...")
                 time.sleep(2.0 * (attempt + 1))
             else:
-                print(f"HTTP {resp.status_code} bei {url}")
+                print(f"[API HTTP {resp.status_code}] Fehler beim Aufruf von {url}")
         except Exception as e:
-            print(f"Fehler bei Request {url}: {e}")
+            print(f"[API EXCEPTION] Versuch {attempt + 1} fehlgeschlagen für {url}: {e}")
             if attempt == max_retries - 1:
                 return None
-            time.sleep(1.0 * (attempt + 1))
+            time.sleep(1.5 * (attempt + 1))
     return None
 
+
+# ==========================================
+# AUTHENTICATION & LOGIN LOGIC
+# ==========================================
 
 def login():
     login_url = f"{API_BASE_URL}/v4/user/login"
@@ -79,7 +107,7 @@ def login():
     
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
-    resp = session.post(login_url, json=payload, timeout=10)
+    resp = session.post(login_url, json=payload, timeout=12)
     resp.raise_for_status()
     data = resp.json()
     
@@ -87,35 +115,20 @@ def login():
     user_info = data.get("u") or {}
     user_id = user_info.get("id") or user_info.get("i")
     leagues = data.get("lins") or []
+    
+    print(f"[LOGIN SUCCESS] Eingeloggt als User-ID: {user_id}")
     return token, user_id, leagues
 
 
-def parse_num(val):
-    if isinstance(val, dict):
-        return val.get("mv") or val.get("v") or val.get("val") or val.get("m") or val.get("amount") or 0
-    if isinstance(val, (int, float)):
-        return int(val)
-    if isinstance(val, str) and val.replace("-", "").replace(".", "").isdigit():
-        return int(val.replace(".", ""))
-    return 0
-
-
-def extract_history_val(item):
-    if isinstance(item, dict):
-        return parse_num(item.get("mv") or item.get("v") or item.get("val") or item.get("m"))
-    if isinstance(item, (int, float)):
-        return int(item)
-    return 0
-
-
 # ==========================================
-# PLAYER DETAILS & MARKET VALUE LOGIC
+# DETAILED PLAYER & MARKET ANALYSIS
 # ==========================================
 
 def get_player_details(league_id, player_id, headers):
     urls = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}",
-        f"{API_BASE_URL}/v4/players/{player_id}"
+        f"{API_BASE_URL}/v4/players/{player_id}",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/market/{player_id}"
     ]
     
     resp = None
@@ -133,44 +146,56 @@ def get_player_details(league_id, player_id, headers):
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # Kickbase v4 Marktwert-Änderung (24h Trend)
+    # 1. Direkter Trend-Wert
     change = parse_num(p.get("tfhmvt"))
     
+    # 2. Alternative Keys im Spieler-Objekt
     if change == 0:
-        for key in ["mvc", "marketValueChange", "dayChange", "delta"]:
-            if key in p:
+        for key in ["mvc", "marketValueChange", "dayChange", "delta", "d"]:
+            if key in p and p[key] is not None:
                 val = parse_num(p[key])
-                if abs(val) > 50:
+                if abs(val) > 0:
                     change = val
                     break
 
+    # 3. Auswertung der Marktwert-Historie (mh)
     if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or p.get("h") or []
         if isinstance(mh, list) and len(mh) >= 2:
             v_today = extract_history_val(mh[-1])
             v_yesterday = extract_history_val(mh[-2])
-            if v_today and v_yesterday:
+            if v_today > 0 and v_yesterday > 0:
                 change = v_today - v_yesterday
 
-    pred = int(change * 0.92)
+    # Deine Logik: Fortführung des gestrigen Marktwerttrends (ca. 92% Dämpfung)
+    if change != 0:
+        pred = int(change * 0.92)
+    else:
+        pred = 0
+
     return mv, change, pred, team_name
 
 
 # ==========================================
-# FULL HISTORICAL FEED & BUDGET CALCULATION
+# HISTORICAL FEED & SQUAD TRACKING
 # ==========================================
 
-def fetch_all_league_transfers(league_id, headers):
-    """
-    Holt über Seiten-Pagination (Page 0..N) alle historischen Transfers der Liga,
-    um die exakte Summe aller Käufe und Verkäufe seit Saisonstart zu berechnen.
-    """
+def fetch_all_league_transfers_and_squads(league_id, headers):
     net_transfers = {}
+    squad_counts = {}
+    
+    cursor_dt = None
+    max_pages = 50
     page = 0
-    max_pages = 40  # Reicht für Hunderte Feed-Einträge
+
+    print("[FEED] Starte Abruf aller historischen Transfers...")
 
     while page < max_pages:
-        url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed?p={page}"
+        if cursor_dt:
+            url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed?dt={cursor_dt}"
+        else:
+            url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed"
+
         resp = fetch_with_retry(url, headers)
         if not resp or resp.status_code != 200:
             break
@@ -180,37 +205,51 @@ def fetch_all_league_transfers(league_id, headers):
         
         if not items:
             break
-            
+
         for item in items:
             item_type = item.get("t") or item.get("type")
             u_id = str(item.get("uid") or item.get("userId") or item.get("u") or "")
             amount = parse_num(item.get("a") or item.get("amount") or item.get("v") or item.get("p"))
             
+            cursor_dt = item.get("dt") or item.get("date") or cursor_dt
+
             if not u_id:
                 continue
 
             if u_id not in net_transfers:
                 net_transfers[u_id] = 0
+            if u_id not in squad_counts:
+                squad_counts[u_id] = 0
 
-            # Transfer-Typen: 12 = Kauf (Geld geht ab), 13 = Verkauf (Geld kommt rein)
+            # Transfer-Typen: 12 = Kauf, 13 = Verkauf
             if item_type in [12, "buy", "BUY"]:
                 if amount > 0:
                     net_transfers[u_id] -= amount
+                squad_counts[u_id] += 1
+
             elif item_type in [13, "sell", "SELL"]:
                 if amount > 0:
                     net_transfers[u_id] += amount
+                squad_counts[u_id] = max(0, squad_counts[u_id] - 1)
 
         page += 1
 
-    return net_transfers
+    print(f"[FEED] Fertig. Transfers von {len(net_transfers)} Managern berechnet.")
+    return net_transfers, squad_counts
 
+
+# ==========================================
+# MANAGER BUDGETS & KADERGRÖSSEN
+# ==========================================
 
 def calculate_manager_budgets(league_id, my_user_id, headers):
     users_raw = []
+    
     endpoints = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/ranking",
         f"{API_BASE_URL}/v4/leagues/{league_id}/users",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/me"
+        f"{API_BASE_URL}/v4/leagues/{league_id}/stats",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/table"
     ]
     
     for ep in endpoints:
@@ -226,15 +265,12 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                     raw.get("u") or 
                     raw.get("users") or 
                     raw.get("items") or 
-                    raw.get("ranking") or 
-                    raw.get("it") or []
+                    raw.get("ranking") or []
                 )
                 if users_raw:
                     break
 
-    # Summe aller historischen Transfers abrufen
-    print("Rufe vollständige Transfer-Historie der Liga ab...")
-    net_transfers = fetch_all_league_transfers(league_id, headers)
+    net_transfers, squad_counts_feed = fetch_all_league_transfers_and_squads(league_id, headers)
 
     budget_list = []
     for u in users_raw:
@@ -244,19 +280,26 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        # Kaderwert & Kadergröße direkt aus dem Ranking-Objekt auslesen
         team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
-        squad_count = parse_num(u.get("s") or u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("squadSize") or u.get("c"))
+        
+        squad_count = parse_num(
+            u.get("s") or u.get("sc") or u.get("playerCount") or 
+            u.get("pc") or u.get("squadSize") or u.get("c") or u.get("sq")
+        )
+        
+        if squad_count == 0 and u_id in squad_counts_feed:
+            squad_count = squad_counts_feed[u_id]
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
-        # Formel: 180 Mio. Startkapital - Aktueller Kaderwert + Netto-Transfers
+        # Formel: Startkapital (180M) - Kaderwert + Netto-Transfers
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
             transfer_balance = net_transfers.get(u_id, 0)
             est_cash = (START_TOTAL_VALUE - team_val) + transfer_balance
 
+        # Max Bidding Power (Bargeld + 33% Dispo auf Kaderwert)
         max_dispo = int(team_val * 0.33)
         max_available = est_cash + max_dispo
         
@@ -272,32 +315,13 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
 
 
 # ==========================================
-# MAIN EXECUTION & HTML REPORT
+# TRANSFER MARKT & PROGNOSEN
 # ==========================================
 
-def main():
-    print("Starte Kickbase Report...")
-    if not KB_EMAIL or not KB_PASSWORD:
-        raise ValueError("FEHLER: KB_EMAIL oder KB_PASSWORD fehlt in den Umgebungsvariablen!")
-
-    token, user_id, leagues = login()
-    headers = BASE_HEADERS.copy()
-    headers["Authorization"] = f"Bearer {token}"
-
-    if not leagues:
-        print("Keine Ligen gefunden.")
-        return
-
-    first_league = leagues[0]
-    league_id = first_league.get("i") or first_league.get("id")
-    print(f"Liga ID: {league_id}")
-
-    # 1. MANAGER BUDGETS
-    df_budgets = calculate_manager_budgets(league_id, user_id, headers)
-
-    # 2. CURRENT MARKET PREDICTIONS
+def get_market_predictions(league_id, headers):
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
     market_rows = []
+    
     if resp_mkt and resp_mkt.status_code == 200:
         mkt_players = resp_mkt.json().get("it") or resp_mkt.json().get("players") or []
         for p in mkt_players:
@@ -330,10 +354,18 @@ def main():
     if not df_market.empty:
         df_market = df_market.sort_values(by="change_raw", ascending=False)
         df_market = df_market.drop(columns=["change_raw"])
+        
+    return df_market
 
-    # 3. SQUAD PREDICTIONS
+
+# ==========================================
+# EIGENER KADER & PROGNOSEN
+# ==========================================
+
+def get_squad_predictions(league_id, headers):
     resp_lineup = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/lineup", headers)
     squad_rows = []
+    
     if resp_lineup and resp_lineup.status_code == 200:
         squad_players = resp_lineup.json().get("it") or resp_lineup.json().get("players") or []
         for p in squad_players:
@@ -364,8 +396,15 @@ def main():
     if not df_squad.empty:
         df_squad = df_squad.sort_values(by="change_raw", ascending=False)
         df_squad = df_squad.drop(columns=["change_raw"])
+        
+    return df_squad
 
-    # HTML TEMPLATE & EMAIL BUILD
+
+# ==========================================
+# HTML BUILDER & E-MAIL VERSAND
+# ==========================================
+
+def send_email_report(df_budgets, df_market, df_squad):
     today_str = datetime.now().strftime("%d-%m-%Y")
     
     html_content = f"""
@@ -386,15 +425,15 @@ def main():
         
         <h2>Manager Budgets & Squad Limits</h2>
         <p>Estimated cash reserves and maximum bidding power (180M baseline, 20 max squad size):</p>
-        {df_budgets.to_html(index=False, escape=False) if not df_budgets.empty else '<p>No data</p>'}
+        {df_budgets.to_html(index=False, escape=False) if not df_budgets.empty else '<p>No data available</p>'}
         
         <h2>Current Market Predictions</h2>
         <p>The following table shows all available players with predicted market values:</p>
-        {df_market.to_html(index=False, escape=False) if not df_market.empty else '<p>No data</p>'}
+        {df_market.to_html(index=False, escape=False) if not df_market.empty else '<p>No data available</p>'}
         
         <h2>Your Squad Predictions</h2>
         <p>Here are the predicted market values for all players currently in your squad:</p>
-        {df_squad.to_html(index=False, escape=False) if not df_squad.empty else '<p>No data</p>'}
+        {df_squad.to_html(index=False, escape=False) if not df_squad.empty else '<p>No data available</p>'}
         
         <br>
         <p>Best regards,<br>Your KickAdvisor Bot</p>
@@ -409,10 +448,10 @@ def main():
     recipient = EMAIL_TO or sender_email
 
     if not sender_email or not sender_password:
-        print("FEHLER beim Mailversand: Keine SMTP-Anmeldedaten gefunden.")
+        print("[ERROR] Keine SMTP-Anmeldedaten vorhanden.")
         return
 
-    print(f"Versuche E-Mail zu senden an {recipient} via {SMTP_SERVER}:{SMTP_PORT}...")
+    print(f"\n[EMAIL] Versuche E-Mail zu senden an {recipient} via {SMTP_SERVER}:{SMTP_PORT}...")
 
     try:
         msg = MIMEMultipart("alternative")
@@ -426,9 +465,49 @@ def main():
         server.login(sender_email, sender_password)
         server.send_message(msg)
         server.quit()
-        print("E-Mail erfolgreich versendet!")
+        print("[EMAIL SUCCESS] E-Mail erfolgreich versendet!")
     except Exception as e:
-        print(f"FEHLER beim Versenden der E-Mail: {e}")
+        print(f"[EMAIL ERROR] Fehler beim Versenden der E-Mail: {e}")
+
+
+# ==========================================
+# MAIN ROUTINE
+# ==========================================
+
+def main():
+    print("==========================================")
+    print("  KICKBASE ADVISOR - BOT START")
+    print("==========================================")
+    
+    if not KB_EMAIL or not KB_PASSWORD:
+        raise ValueError("FEHLER: KB_EMAIL oder KB_PASSWORD fehlt in den Umgebungsvariablen!")
+
+    token, user_id, leagues = login()
+    headers = BASE_HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
+
+    if not leagues:
+        print("[ERROR] Keine Ligen für diesen Account gefunden.")
+        return
+
+    first_league = leagues[0]
+    league_id = first_league.get("i") or first_league.get("id")
+    print(f"[INFO] Gewählte Liga ID: {league_id}")
+
+    # 1. MANAGER BUDGETS
+    print("\n--- 1. Berechne Manager-Budgets ---")
+    df_budgets = calculate_manager_budgets(league_id, user_id, headers)
+
+    # 2. MARKET PREDICTIONS
+    print("\n--- 2. Lade Transfermarkt & erstelle Prognosen ---")
+    df_market = get_market_predictions(league_id, headers)
+
+    # 3. SQUAD PREDICTIONS
+    print("\n--- 3. Lade eigenen Kader & erstelle Prognosen ---")
+    df_squad = get_squad_predictions(league_id, headers)
+
+    # 4. EMAIL REPORT
+    send_email_report(df_budgets, df_market, df_squad)
 
 
 if __name__ == "__main__":
