@@ -52,7 +52,7 @@ def fmt_de(val):
 
 def parse_num(val):
     if isinstance(val, dict):
-        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue"]:
+        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue", "value"]:
             if key in val and val[key] is not None:
                 return parse_num(val[key])
         return 0
@@ -146,19 +146,19 @@ def get_player_details(league_id, player_id, headers):
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # 1. Direkter Trend-Wert
+    # 1. Direkter Trend-Wert aus v4
     change = parse_num(p.get("tfhmvt"))
     
-    # 2. Alternative Keys im Spieler-Objekt
+    # 2. Alternative Keys im Spieler-Objekt durchsuchen
     if change == 0:
-        for key in ["mvc", "marketValueChange", "dayChange", "delta", "d"]:
+        for key in ["mvc", "marketValueChange", "dayChange", "delta", "d", "mvc24"]:
             if key in p and p[key] is not None:
                 val = parse_num(p[key])
                 if abs(val) > 0:
                     change = val
                     break
 
-    # 3. Auswertung der Marktwert-Historie (mh)
+    # 3. Auswertung der historischen Marktwert-Liste (mh / marketHistory)
     if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or p.get("h") or []
         if isinstance(mh, list) and len(mh) >= 2:
@@ -167,7 +167,7 @@ def get_player_details(league_id, player_id, headers):
             if v_today > 0 and v_yesterday > 0:
                 change = v_today - v_yesterday
 
-    # Deine Logik: Fortführung des gestrigen Marktwerttrends (ca. 92% Dämpfung)
+    # Marktwert-Prognose für morgen (Fortführung des Trends mit Dämpfung)
     if change != 0:
         pred = int(change * 0.92)
     else:
@@ -188,7 +188,7 @@ def fetch_all_league_transfers_and_squads(league_id, headers):
     max_pages = 50
     page = 0
 
-    print("[FEED] Starte Abruf aller historischen Transfers...")
+    print("[FEED] Starte tiefen Abruf aller historischen Liga-Transfers...")
 
     while page < max_pages:
         if cursor_dt:
@@ -198,6 +198,7 @@ def fetch_all_league_transfers_and_squads(league_id, headers):
 
         resp = fetch_with_retry(url, headers)
         if not resp or resp.status_code != 200:
+            print(f"[FEED WARN] Abruf gestoppt bei Seite {page}")
             break
             
         data = resp.json()
@@ -221,7 +222,7 @@ def fetch_all_league_transfers_and_squads(league_id, headers):
             if u_id not in squad_counts:
                 squad_counts[u_id] = 0
 
-            # Transfer-Typen: 12 = Kauf, 13 = Verkauf
+            # Transfer-Auswertung (12 = Kauf, 13 = Verkauf)
             if item_type in [12, "buy", "BUY"]:
                 if amount > 0:
                     net_transfers[u_id] -= amount
@@ -234,7 +235,7 @@ def fetch_all_league_transfers_and_squads(league_id, headers):
 
         page += 1
 
-    print(f"[FEED] Fertig. Transfers von {len(net_transfers)} Managern berechnet.")
+    print(f"[FEED SUCCESS] Transfers von {len(net_transfers)} Managern erfolgreich verarbeitet.")
     return net_transfers, squad_counts
 
 
@@ -282,24 +283,26 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         
         team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
         
+        # Erkennung der Kadergröße aus verschiedenen v4-Keys
         squad_count = parse_num(
             u.get("s") or u.get("sc") or u.get("playerCount") or 
-            u.get("pc") or u.get("squadSize") or u.get("c") or u.get("sq")
+            u.get("pc") or u.get("squadSize") or u.get("c") or u.get("sq") or u.get("playersCount")
         )
         
+        # Fallback auf die gezählten Feed-Käufe
         if squad_count == 0 and u_id in squad_counts_feed:
             squad_count = squad_counts_feed[u_id]
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
-        # Formel: Startkapital (180M) - Kaderwert + Netto-Transfers
+        # Budget-Berechnung: Startkapital - Kaderwert + Netto-Transferbalance
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
             transfer_balance = net_transfers.get(u_id, 0)
             est_cash = (START_TOTAL_VALUE - team_val) + transfer_balance
 
-        # Max Bidding Power (Bargeld + 33% Dispo auf Kaderwert)
+        # Bietpower inklusive Dispo (33% Beleihung des Kaderwerts)
         max_dispo = int(team_val * 0.33)
         max_available = est_cash + max_dispo
         
@@ -315,7 +318,7 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
 
 
 # ==========================================
-# TRANSFER MARKT & PROGNOSEN
+# TRANSFERMARKT & PROGNOSEN
 # ==========================================
 
 def get_market_predictions(league_id, headers):
@@ -401,7 +404,7 @@ def get_squad_predictions(league_id, headers):
 
 
 # ==========================================
-# HTML BUILDER & E-MAIL VERSAND
+# HTML REPORT BUILDER & EMAIL DISPATCH
 # ==========================================
 
 def send_email_report(df_budgets, df_market, df_squad):
@@ -471,7 +474,7 @@ def send_email_report(df_budgets, df_market, df_squad):
 
 
 # ==========================================
-# MAIN ROUTINE
+# MAIN EXECUTION ROUTINE
 # ==========================================
 
 def main():
