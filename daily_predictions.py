@@ -28,6 +28,10 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
+# Regelwerk eurer Liga
+START_TOTAL_VALUE = 180000000  # 100 Mio. Kaderwert + 80 Mio. Startbudget
+MAX_SQUAD_SIZE = 20           # Max. 20 Spieler im Kader
+
 def fmt_de(val):
     if pd.isna(val) or val is None:
         return "0"
@@ -124,6 +128,79 @@ def get_player_details(league_id, player_id, headers):
     pred = int(change * 0.92)
     return mv, change, pred, team_name
 
+def calculate_manager_budgets(league_id, my_user_id, headers):
+    """Holt die Manager-Tabelle und berechnet Bargeld & Bietgrenzen auf Basis von 180m Startguthaben."""
+    
+    resp_rank = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
+    if not resp_rank or resp_rank.status_code != 200:
+        resp_rank = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
+        
+    if not resp_rank or resp_rank.status_code != 200:
+        return pd.DataFrame()
+
+    raw = resp_rank.json()
+    users_raw = []
+    if isinstance(raw, list):
+        users_raw = raw
+    elif isinstance(raw, dict):
+        users_raw = raw.get("u") or raw.get("users") or raw.get("items") or raw.get("ranking") or raw.get("it") or []
+
+    # Liga-Feed zur Nachverfolgung der Käufe/Verkäufe
+    feed_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/feed", headers)
+    net_transfers = {}
+    
+    if feed_resp and feed_resp.status_code == 200:
+        feed_data = feed_resp.json()
+        items = feed_data.get("it") or feed_data.get("items") or []
+        for item in items:
+            item_type = item.get("t") or item.get("type")
+            u_id = item.get("uid") or item.get("userId")
+            amount = parse_num(item.get("a") or item.get("amount") or item.get("v"))
+            
+            if u_id and amount > 0:
+                if u_id not in net_transfers:
+                    net_transfers[u_id] = 0
+                if item_type in [12, "buy"]:
+                    net_transfers[u_id] -= amount
+                elif item_type in [13, "sell"]:
+                    net_transfers[u_id] += amount
+
+    budget_list = []
+    for u in users_raw:
+        if not isinstance(u, dict):
+            continue
+            
+        u_id = str(u.get("i") or u.get("id") or u.get("uid"))
+        name = u.get("n") or u.get("name") or u.get("userName") or "Manager"
+        
+        team_val = parse_num(u.get("tv") or u.get("teamValue"))
+        squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc"))
+        
+        direct_budget = parse_num(u.get("b") or u.get("budget"))
+        
+        # Eigenes Budget ist exakt bekannt, fremde Manager werden geschätzt
+        if u_id == str(my_user_id) and direct_budget != 0:
+            est_cash = direct_budget
+        else:
+            # Korrigiert: 180 Mio. Start-Gesamtwert (100m Kader + 80m Bar)
+            start_cash_estimate = max(0, START_TOTAL_VALUE - team_val)
+            transfer_balance = net_transfers.get(u_id, 0)
+            est_cash = start_cash_estimate + transfer_balance
+
+        # Max Dispo (33% des Teamwerts im Minus)
+        max_dispo = int(team_val * 0.33)
+        max_available = est_cash + max_dispo
+        
+        budget_list.append({
+            "Manager": name,
+            "Team Value": fmt_de(team_val),
+            "Squad": f"{squad_count}/{MAX_SQUAD_SIZE}",
+            "Est. Cash": fmt_de(est_cash),
+            "Max Available": fmt_de(max_available)
+        })
+
+    return pd.DataFrame(budget_list)
+
 def main():
     print("Starte Kickbase Report...")
     if not KB_EMAIL or not KB_PASSWORD:
@@ -141,45 +218,8 @@ def main():
     league_id = first_league.get("i") or first_league.get("id")
     print(f"Liga ID: {league_id}")
 
-    # 1. MANAGER BUDGETS
-    budget_data = []
-    
-    # Abfrage für das Ranking/User der Liga
-    resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
-    if not resp_users or resp_users.status_code != 200:
-        resp_users = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
-
-    if resp_users and resp_users.status_code == 200:
-        raw = resp_users.json()
-        
-        # In v4 können User in "u", "users", "items" oder "ranking" stecken
-        users = []
-        if isinstance(raw, list):
-            users = raw
-        elif isinstance(raw, dict):
-            users = raw.get("u") or raw.get("users") or raw.get("items") or raw.get("ranking") or raw.get("it") or []
-
-        for u in users:
-            if not isinstance(u, dict):
-                continue
-                
-            name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
-            budget = parse_num(u.get("b") or u.get("budget"))
-            team_val = parse_num(u.get("tv") or u.get("teamValue"))
-            
-            # Falls mneg nicht explizit dabei ist, berechnen wir 33% vom Teamwert
-            max_neg = parse_num(u.get("mneg")) if "mneg" in u else int(-team_val * 0.33)
-            avail = budget - max_neg if budget != 0 else 0
-            
-            budget_data.append({
-                "User": name,
-                "Budget": fmt_de(budget),
-                "Team Value": fmt_de(team_val),
-                "Max Negative": fmt_de(max_neg),
-                "Available Budget": fmt_de(avail)
-            })
-
-    df_budgets = pd.DataFrame(budget_data)
+    # 1. MANAGER BUDGETS (mit 180 Mio. Basis & 20er Kaderlimit)
+    df_budgets = calculate_manager_budgets(league_id, user_id, headers)
 
     # 2. CURRENT MARKET PREDICTIONS
     resp_mkt = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/market", headers)
@@ -236,73 +276,4 @@ def main():
             if team_name == "Unbekannt":
                 team_name = team_base
 
-            squad_rows.append({
-                "last_name": last_name,
-                "team_name": team_name,
-                "mv": fmt_de(mv),
-                "change_raw": change,
-                "mv_change_yesterday": fmt_de(change),
-                "predicted_mv_target": fmt_de(pred),
-                "s_11_prob": "NaN"
-            })
-
-    df_squad = pd.DataFrame(squad_rows)
-    if not df_squad.empty:
-        df_squad = df_squad.sort_values(by="change_raw", ascending=False)
-        df_squad = df_squad.drop(columns=["change_raw"])
-
-    # HTML TEMPLATE
-    today_str = datetime.now().strftime("%d-%m-%Y")
-    
-    html_content = f"""
-    <html>
-    <head>
-        <style>
-            body {{ font-family: Arial, sans-serif; background-color: #2b2b2b; color: #e0e0e0; padding: 20px; }}
-            h1, h2 {{ color: #ffffff; }}
-            table {{ border-collapse: collapse; width: 100%; margin-bottom: 25px; background-color: #333333; color: #ffffff; font-size: 13px; }}
-            th {{ background-color: #444444; text-align: left; padding: 8px; border: 1px solid #555; color: #ffffff; }}
-            td {{ padding: 8px; border: 1px solid #555; }}
-            tr:nth-child(even) {{ background-color: #3a3a3a; }}
-        </style>
-    </head>
-    <body>
-        <h1>Kickbase Report for {today_str}</h1>
-        <p>Greetings!</p>
-        
-        <h2>Manager Budgets</h2>
-        <p>Here are the current budgets of all managers in your league:</p>
-        {df_budgets.to_html(index=False, escape=False) if not df_budgets.empty else '<p>No data</p>'}
-        
-        <h2>Current Market Predictions</h2>
-        <p>The following table shows all available players with a substantial positive predicted market value for the next day:</p>
-        {df_market.to_html(index=False, escape=False) if not df_market.empty else '<p>No data</p>'}
-        
-        <h2>Your Squad Predictions</h2>
-        <p>Here are the predicted market values for all players currently in your squad:</p>
-        {df_squad.to_html(index=False, escape=False) if not df_squad.empty else '<p>No data</p>'}
-        
-        <br>
-        <p>Best regards,<br>Your KickAdvisor Bot</p>
-        <hr>
-        <p style="font-size: 11px; color: #888888;">This email was generated by the Kickbase Trading Advisor</p>
-    </body>
-    </html>
-    """
-
-    if SMTP_USER and SMTP_PASSWORD:
-        msg = MIMEMultipart("alternative")
-        msg['From'] = SMTP_USER
-        msg['To'] = EMAIL_TO
-        msg['Subject'] = f"Kickbase: {today_str}"
-        msg.attach(MIMEText(html_content, 'html', 'utf-8'))
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print("Report erfolgreich versendet!")
-
-if __name__ == "__main__":
-    main()
+            
