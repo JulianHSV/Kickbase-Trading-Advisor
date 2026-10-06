@@ -32,7 +32,7 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-START_TOTAL_VALUE = 180000000  # 180 Mio. Euro Baseline (100M Startkader + 80M Startcash)
+START_TOTAL_VALUE = 180000000  # 180 Mio. Euro Baseline
 MAX_SQUAD_SIZE = 20
 
 
@@ -52,7 +52,7 @@ def fmt_de(val):
 
 def parse_num(val):
     if isinstance(val, dict):
-        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue", "value", "teamValue", "tv", "mvt", "bu"]:
+        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue", "value", "teamValue", "tv", "mvt", "bu", "c", "count", "squadSize"]:
             if key in val and val[key] is not None:
                 return parse_num(val[key])
         return 0
@@ -62,6 +62,33 @@ def parse_num(val):
         clean_str = val.replace("-", "").replace(".", "").replace(",", "").strip()
         if clean_str.isdigit():
             return int(clean_str)
+    return 0
+
+
+def extract_squad_count_from_dict(u_dict):
+    """
+    Durchsucht ein Manager-Objekt aus v4 tiefenstrukturiert nach der Kadergröße.
+    """
+    if not isinstance(u_dict, dict):
+        return 0
+        
+    # Direct keys
+    for k in ["s", "sc", "playerCount", "pc", "squadSize", "c", "sq", "playersCount", "p", "pl", "count"]:
+        if k in u_dict and isinstance(u_dict[k], (int, float, str)):
+            parsed = parse_num(u_dict[k])
+            if parsed > 0:
+                return parsed
+                
+    # Nested arrays or sub-dicts
+    for sub_key in ["squad", "players", "profile", "stats"]:
+        if sub_key in u_dict:
+            sub_val = u_dict[sub_key]
+            if isinstance(sub_val, list):
+                return len(sub_val)
+            elif isinstance(sub_val, dict):
+                res = extract_squad_count_from_dict(sub_val)
+                if res > 0:
+                    return res
     return 0
 
 
@@ -146,10 +173,8 @@ def get_player_details(league_id, player_id, headers):
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # 1. Direkter Trend-Wert aus v4
     change = parse_num(p.get("tfhmvt"))
     
-    # 2. Alternative Keys im Spieler-Objekt durchsuchen
     if change == 0:
         for key in ["mvc", "marketValueChange", "dayChange", "delta", "d", "mvc24"]:
             if key in p and p[key] is not None:
@@ -158,7 +183,6 @@ def get_player_details(league_id, player_id, headers):
                     change = val
                     break
 
-    # 3. Auswertung der historischen Marktwert-Liste (mh / marketHistory)
     if change == 0:
         mh = p.get("mh") or p.get("marketHistory") or p.get("mvh") or p.get("h") or []
         if isinstance(mh, list) and len(mh) >= 2:
@@ -167,7 +191,6 @@ def get_player_details(league_id, player_id, headers):
             if v_today > 0 and v_yesterday > 0:
                 change = v_today - v_yesterday
 
-    # Marktwert-Prognose für morgen (Fortführung des Trends mit Dämpfung)
     if change != 0:
         pred = int(change * 0.92)
     else:
@@ -181,10 +204,6 @@ def get_player_details(league_id, player_id, headers):
 # ==========================================
 
 def fetch_ranking_squad_data(league_id, headers):
-    """
-    Liest gesicherte Daten direkt aus dem Ranking-Endpunkt ab,
-    ohne gesperrte REST-Pfade (wie /users/{id} oder /feed) aufzurufen.
-    """
     squad_counts = {}
     team_values = {}
     
@@ -199,14 +218,7 @@ def fetch_ranking_squad_data(league_id, headers):
             for u in items:
                 u_id = str(u.get("i") or u.get("id") or u.get("uid") or "")
                 if u_id:
-                    # Auslesen der mitgelieferten Kadergröße aus den v4-Ranking-Objekten
-                    sq_cnt = parse_num(
-                        u.get("s") or u.get("sc") or u.get("playerCount") or 
-                        u.get("pc") or u.get("squadSize") or u.get("c") or 
-                        u.get("sq") or u.get("playersCount") or u.get("p") or u.get("pl")
-                    )
-                    
-                    # Auslesen des echten Kaderwerts
+                    sq_cnt = extract_squad_count_from_dict(u)
                     tv_val = parse_num(
                         u.get("tv") or u.get("teamValue") or u.get("v") or 
                         u.get("value") or u.get("mvt") or u.get("m")
@@ -228,7 +240,6 @@ def fetch_ranking_squad_data(league_id, headers):
 def calculate_manager_budgets(league_id, my_user_id, headers):
     users_raw = []
     
-    # Nutzung ausschließlich stabiler, nicht gesperrter v4-Endpunkte
     endpoints = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/ranking",
         f"{API_BASE_URL}/v4/leagues/{league_id}/stats"
@@ -262,7 +273,6 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        # Kaderwert ermitteln (Entweder direkt aus u oder aus der Ranking-Analyse)
         team_val = parse_num(
             u.get("tv") or u.get("teamValue") or u.get("v") or 
             u.get("value") or u.get("mvt") or u.get("m")
@@ -270,28 +280,20 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         if team_val == 0 and u_id in team_values_rank:
             team_val = team_values_rank[u_id]
         
-        # Kadergröße ermitteln
-        squad_count = parse_num(
-            u.get("s") or u.get("sc") or u.get("playerCount") or 
-            u.get("pc") or u.get("squadSize") or u.get("c") or 
-            u.get("sq") or u.get("playersCount") or u.get("p") or u.get("pl")
-        )
+        squad_count = extract_squad_count_from_dict(u)
         if squad_count == 0 and u_id in squad_counts_rank:
             squad_count = squad_counts_rank[u_id]
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
-        # Option 2: Reine, verlässliche Baseline-Berechnung ohne spekulative Feed-Aufrufe
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
             est_cash = START_TOTAL_VALUE - team_val
 
-        # Maximal verfügbares Gebot (Bargeld + 33% Dispo / Beleihung des Kaderwerts)
         max_dispo = int(team_val * 0.33)
         max_available = est_cash + max_dispo
         
-        # Formatierung der Kadergröße
         squad_str = f"{squad_count}/{MAX_SQUAD_SIZE}" if squad_count > 0 else f"0/{MAX_SQUAD_SIZE}"
         
         budget_list.append({
