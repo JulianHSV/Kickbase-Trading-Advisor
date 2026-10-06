@@ -32,7 +32,7 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-START_TOTAL_VALUE = 180000000  # 180 Mio. Euro Baseline
+START_TOTAL_VALUE = 180000000  # 180 Mio. Euro Baseline (100M Startkader + 80M Startcash)
 MAX_SQUAD_SIZE = 20
 
 
@@ -52,7 +52,7 @@ def fmt_de(val):
 
 def parse_num(val):
     if isinstance(val, dict):
-        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue", "value"]:
+        for key in ["mv", "v", "val", "m", "amount", "price", "p", "marketValue", "value", "teamValue", "tv", "mvt", "bu"]:
             if key in val and val[key] is not None:
                 return parse_num(val[key])
         return 0
@@ -177,79 +177,48 @@ def get_player_details(league_id, player_id, headers):
 
 
 # ==========================================
-# HISTORICAL FEED & SQUAD TRACKING
+# RANKING-BASED SQUAD & BUDGET EXTRACTION
 # ==========================================
 
-def fetch_all_league_transfers_and_squads(league_id, headers):
-    net_transfers = {}
+def fetch_ranking_squad_data(league_id, headers):
+    """
+    Liest gesicherte Daten direkt aus dem Ranking-Endpunkt ab,
+    ohne gesperrte REST-Pfade (wie /users/{id} oder /feed) aufzurufen.
+    """
     squad_counts = {}
+    team_values = {}
     
-    # Korrektur der v4 Endpunkte für den Liga-Feed basierend auf dem Log (404 /feed behoben)
-    feed_endpoints = [
-        f"{API_BASE_URL}/v4/leagues/{league_id}/activity",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/news",
-        f"{API_BASE_URL}/v3/leagues/{league_id}/feed"
-    ]
+    ranking_url = f"{API_BASE_URL}/v4/leagues/{league_id}/ranking"
+    resp = fetch_with_retry(ranking_url, headers)
+    
+    if resp and resp.status_code == 200:
+        data = resp.json()
+        items = data if isinstance(data, list) else (data.get("us") or data.get("users") or data.get("it") or data.get("ranking") or [])
+        
+        if isinstance(items, list):
+            for u in items:
+                u_id = str(u.get("i") or u.get("id") or u.get("uid") or "")
+                if u_id:
+                    # Auslesen der mitgelieferten Kadergröße aus den v4-Ranking-Objekten
+                    sq_cnt = parse_num(
+                        u.get("s") or u.get("sc") or u.get("playerCount") or 
+                        u.get("pc") or u.get("squadSize") or u.get("c") or 
+                        u.get("sq") or u.get("playersCount") or u.get("p") or u.get("pl")
+                    )
+                    
+                    # Auslesen des echten Kaderwerts
+                    tv_val = parse_num(
+                        u.get("tv") or u.get("teamValue") or u.get("v") or 
+                        u.get("value") or u.get("mvt") or u.get("m")
+                    )
+                    
+                    if sq_cnt > 0:
+                        squad_counts[u_id] = sq_cnt
+                    if tv_val > 0:
+                        team_values[u_id] = tv_val
 
-    print("[FEED] Starte tiefen Abruf aller historischen Liga-Transfers...")
-
-    for ep_base in feed_endpoints:
-        cursor_dt = None
-        max_pages = 50
-        page = 0
-        found_data = False
-
-        while page < max_pages:
-            if cursor_dt:
-                url = f"{ep_base}?dt={cursor_dt}"
-            else:
-                url = ep_base
-
-            resp = fetch_with_retry(url, headers)
-            if not resp or resp.status_code != 200:
-                break
-                
-            data = resp.json()
-            items = data.get("it") or data.get("items") or data.get("a") or []
-            
-            if not items or not isinstance(items, list):
-                break
-
-            found_data = True
-            for item in items:
-                item_type = item.get("t") or item.get("type")
-                u_id = str(item.get("uid") or item.get("userId") or item.get("u") or "")
-                amount = parse_num(item.get("a") or item.get("amount") or item.get("v") or item.get("p"))
-                
-                cursor_dt = item.get("dt") or item.get("date") or cursor_dt
-
-                if not u_id:
-                    continue
-
-                if u_id not in net_transfers:
-                    net_transfers[u_id] = 0
-                if u_id not in squad_counts:
-                    squad_counts[u_id] = 0
-
-                # Transfer-Auswertung (12 = Kauf, 13 = Verkauf)
-                if item_type in [12, "buy", "BUY"]:
-                    if amount > 0:
-                        net_transfers[u_id] -= amount
-                    squad_counts[u_id] += 1
-
-                elif item_type in [13, "sell", "SELL"]:
-                    if amount > 0:
-                        net_transfers[u_id] += amount
-                    squad_counts[u_id] = max(0, squad_counts[u_id] - 1)
-
-            page += 1
-
-        if found_data:
-            print(f"[FEED SUCCESS] Erfolgreich Daten abgerufen von: {ep_base}")
-            break
-
-    print(f"[FEED SUCCESS] Transfers von {len(net_transfers)} Managern erfolgreich verarbeitet.")
-    return net_transfers, squad_counts
+    print(f"[RANKING SUCCESS] Ligadaten für {len(team_values)} Manager erfolgreich ausgelesen.")
+    return squad_counts, team_values
 
 
 # ==========================================
@@ -259,11 +228,10 @@ def fetch_all_league_transfers_and_squads(league_id, headers):
 def calculate_manager_budgets(league_id, my_user_id, headers):
     users_raw = []
     
+    # Nutzung ausschließlich stabiler, nicht gesperrter v4-Endpunkte
     endpoints = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/ranking",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/users",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/stats",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/table"
+        f"{API_BASE_URL}/v4/leagues/{league_id}/stats"
     ]
     
     for ep in endpoints:
@@ -284,7 +252,7 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                 if users_raw:
                     break
 
-    net_transfers, squad_counts_feed = fetch_all_league_transfers_and_squads(league_id, headers)
+    squad_counts_rank, team_values_rank = fetch_ranking_squad_data(league_id, headers)
 
     budget_list = []
     for u in users_raw:
@@ -294,42 +262,42 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
+        # Kaderwert ermitteln (Entweder direkt aus u oder aus der Ranking-Analyse)
+        team_val = parse_num(
+            u.get("tv") or u.get("teamValue") or u.get("v") or 
+            u.get("value") or u.get("mvt") or u.get("m")
+        )
+        if team_val == 0 and u_id in team_values_rank:
+            team_val = team_values_rank[u_id]
         
-        # Erkennung der Kadergröße aus verschiedenen v4-Keys
+        # Kadergröße ermitteln
         squad_count = parse_num(
             u.get("s") or u.get("sc") or u.get("playerCount") or 
-            u.get("pc") or u.get("squadSize") or u.get("c") or u.get("sq") or u.get("playersCount")
+            u.get("pc") or u.get("squadSize") or u.get("c") or 
+            u.get("sq") or u.get("playersCount") or u.get("p") or u.get("pl")
         )
-        
-        # Zusätzlicher Fallback: Abruf des spezifischen User-Objekts
-        if squad_count == 0:
-            u_detail_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}", headers)
-            if u_detail_resp and u_detail_resp.status_code == 200:
-                u_data = u_detail_resp.json()
-                squad_count = parse_num(u_data.get("sc") or u_data.get("playerCount") or u_data.get("s") or u_data.get("c"))
-
-        # Fallback auf die gezählten Feed-Käufe
-        if squad_count == 0 and u_id in squad_counts_feed:
-            squad_count = squad_counts_feed[u_id]
+        if squad_count == 0 and u_id in squad_counts_rank:
+            squad_count = squad_counts_rank[u_id]
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
-        # Budget-Berechnung: Startkapital - Kaderwert + Netto-Transferbalance
+        # Option 2: Reine, verlässliche Baseline-Berechnung ohne spekulative Feed-Aufrufe
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
-            transfer_balance = net_transfers.get(u_id, 0)
-            est_cash = (START_TOTAL_VALUE - team_val) + transfer_balance
+            est_cash = START_TOTAL_VALUE - team_val
 
-        # Bietpower inklusive Dispo (33% Beleihung des Kaderwerts)
+        # Maximal verfügbares Gebot (Bargeld + 33% Dispo / Beleihung des Kaderwerts)
         max_dispo = int(team_val * 0.33)
         max_available = est_cash + max_dispo
+        
+        # Formatierung der Kadergröße
+        squad_str = f"{squad_count}/{MAX_SQUAD_SIZE}" if squad_count > 0 else f"0/{MAX_SQUAD_SIZE}"
         
         budget_list.append({
             "Manager": name,
             "Team Value": fmt_de(team_val),
-            "Squad": f"{squad_count}/{MAX_SQUAD_SIZE}",
+            "Squad": squad_str,
             "Est. Cash": fmt_de(est_cash),
             "Max Available": fmt_de(max_available)
         })
