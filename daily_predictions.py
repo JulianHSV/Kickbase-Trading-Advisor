@@ -133,8 +133,6 @@ def get_player_details(league_id, player_id, headers):
     return mv, change, pred, team_name
 
 def calculate_manager_budgets(league_id, my_user_id, headers):
-    """Holt die Manager-Tabelle und berechnet Bargeld & Bietgrenzen auf Basis von 180m Startguthaben."""
-    
     users_raw = []
     endpoints = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/ranking",
@@ -154,7 +152,6 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                 if users_raw:
                     break
 
-    # Feed für Transferhistorie auslesen
     feed_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/feed", headers)
     net_transfers = {}
     
@@ -182,9 +179,43 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        # Kader-Details des einzelnen Managers holen
         squad_count = 0
         team_val = 0
         user_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}", headers)
         
-        if user_resp and
+        if user_resp and user_resp.status_code == 200:
+            udata = user_resp.json()
+            players = udata.get("p") or udata.get("players") or udata.get("it") or []
+            squad_count = len(players)
+            for p in players:
+                team_val += parse_num(p.get("mv") or p.get("marketValue") or p.get("v"))
+        
+        if team_val == 0:
+            team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v"))
+        if squad_count == 0:
+            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c"))
+
+        direct_budget = parse_num(u.get("b") or u.get("budget"))
+        
+        if u_id == str(my_user_id) and direct_budget != 0:
+            est_cash = direct_budget
+        else:
+            start_cash_estimate = max(0, START_TOTAL_VALUE - team_val)
+            transfer_balance = net_transfers.get(u_id, 0)
+            est_cash = start_cash_estimate + transfer_balance
+
+        max_dispo = int(team_val * 0.33)
+        max_available = est_cash + max_dispo
+        
+        budget_list.append({
+            "Manager": name,
+            "Team Value": fmt_de(team_val),
+            "Squad": f"{squad_count}/{MAX_SQUAD_SIZE}",
+            "Est. Cash": fmt_de(est_cash),
+            "Max Available": fmt_de(max_available)
+        })
+
+    return pd.DataFrame(budget_list)
+
+def main():
+    
