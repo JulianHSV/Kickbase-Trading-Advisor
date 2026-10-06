@@ -95,8 +95,8 @@ def parse_num(val):
         return val.get("mv") or val.get("v") or val.get("val") or val.get("m") or val.get("amount") or 0
     if isinstance(val, (int, float)):
         return int(val)
-    if isinstance(val, str) and val.replace("-", "").isdigit():
-        return int(val)
+    if isinstance(val, str) and val.replace("-", "").replace(".", "").isdigit():
+        return int(val.replace(".", ""))
     return 0
 
 
@@ -162,23 +162,15 @@ def get_player_details(league_id, player_id, headers):
 
 def fetch_all_league_transfers(league_id, headers):
     """
-    Durchläuft den gesamten Liga-Feed seit Beginn der Saison über Pagination,
-    um lückenlos ALLE Käufe und Verkäufe aller Manager aufzusummieren.
+    Holt über Seiten-Pagination (Page 0..N) alle historischen Transfers der Liga,
+    um die exakte Summe aller Käufe und Verkäufe seit Saisonstart zu berechnen.
     """
     net_transfers = {}
-    player_counts = {}
-    
-    start_time = None
-    has_more = True
     page = 0
-    max_pages = 50  # Bis zu 50 Seiten Feed abrufen (deckt Monate ab)
+    max_pages = 40  # Reicht für Hunderte Feed-Einträge
 
-    while has_more and page < max_pages:
-        page += 1
-        url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed"
-        if start_time:
-            url += f"?start={start_time}"
-            
+    while page < max_pages:
+        url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed?p={page}"
         resp = fetch_with_retry(url, headers)
         if not resp or resp.status_code != 200:
             break
@@ -199,10 +191,8 @@ def fetch_all_league_transfers(league_id, headers):
 
             if u_id not in net_transfers:
                 net_transfers[u_id] = 0
-            if u_id not in player_counts:
-                player_counts[u_id] = 0
 
-            # Transfer-Typen: 12/buy = Kauf, 13/sell = Verkauf
+            # Transfer-Typen: 12 = Kauf (Geld geht ab), 13 = Verkauf (Geld kommt rein)
             if item_type in [12, "buy", "BUY"]:
                 if amount > 0:
                     net_transfers[u_id] -= amount
@@ -210,56 +200,9 @@ def fetch_all_league_transfers(league_id, headers):
                 if amount > 0:
                     net_transfers[u_id] += amount
 
-        # Pagination-Zeitstempel für den nächsten Aufruf setzen
-        last_item = items[-1]
-        start_time = last_item.get("dt") or last_item.get("date") or last_item.get("t")
-        
-        if not start_time or len(items) < 10:
-            has_more = False
+        page += 1
 
     return net_transfers
-
-
-def fetch_user_squad(league_id, u_id, headers):
-    """
-    Versucht über verschiedene Endpunkte die Spieleranzahl und den Kaderwert abzufragen.
-    """
-    squad_endpoints = [
-        f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/squad",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/players",
-        f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}"
-    ]
-    
-    players = []
-    team_val_direct = 0
-    
-    for ep in squad_endpoints:
-        resp = fetch_with_retry(ep, headers)
-        if resp and resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list):
-                players = data
-                break
-            elif isinstance(data, dict):
-                team_val_direct = parse_num(data.get("tv") or data.get("teamValue") or data.get("v") or data.get("m"))
-                players = (
-                    data.get("p") or 
-                    data.get("players") or 
-                    data.get("it") or 
-                    data.get("squad") or 
-                    data.get("items") or []
-                )
-                if players:
-                    break
-                    
-    calculated_val = 0
-    for p in players:
-        if isinstance(p, dict):
-            p_mv = parse_num(p.get("mv") or p.get("marketValue") or p.get("v"))
-            calculated_val += p_mv
-            
-    final_team_val = calculated_val if calculated_val > 0 else team_val_direct
-    return len(players), final_team_val
 
 
 def calculate_manager_budgets(league_id, my_user_id, headers):
@@ -289,7 +232,7 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                 if users_raw:
                     break
 
-    # Sämtliche Netto-Transfers seit Ligastart durch den vollständigen Feed aufsummieren
+    # Summe aller historischen Transfers abrufen
     print("Rufe vollständige Transfer-Historie der Liga ab...")
     net_transfers = fetch_all_league_transfers(league_id, headers)
 
@@ -301,17 +244,13 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        squad_count, team_val = fetch_user_squad(league_id, u_id, headers)
-        
-        if team_val == 0:
-            team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
-        if squad_count == 0:
-            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c") or u.get("squadSize") or u.get("s"))
+        # Kaderwert & Kadergröße direkt aus dem Ranking-Objekt auslesen
+        team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
+        squad_count = parse_num(u.get("s") or u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("squadSize") or u.get("c"))
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
-        # Für den eigenen Account direkt das Budget nehmen, sonst berechnen:
-        # Formel: 180M Startkapital - Aktueller Kaderwert + Summe Aller Netto-Transfers
+        # Formel: 180 Mio. Startkapital - Aktueller Kaderwert + Netto-Transfers
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
