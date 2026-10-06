@@ -50,9 +50,12 @@ def fetch_with_retry(url, headers, max_retries=3):
                 return resp
             elif resp.status_code == 429:
                 time.sleep(2.0 * (attempt + 1))
-        except Exception:
+            else:
+                print(f"HTTP {resp.status_code} bei {url}")
+        except Exception as e:
+            print(f"Fehler bei Request {url}: {e}")
             if attempt == max_retries - 1:
-                raise
+                return None
             time.sleep(1.0 * (attempt + 1))
     return None
 
@@ -132,21 +135,27 @@ def get_player_details(league_id, player_id, headers):
 def calculate_manager_budgets(league_id, my_user_id, headers):
     """Holt die Manager-Tabelle und berechnet Bargeld & Bietgrenzen auf Basis von 180m Startguthaben."""
     
-    resp_rank = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/ranking", headers)
-    if not resp_rank or resp_rank.status_code != 200:
-        resp_rank = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users", headers)
-        
-    if not resp_rank or resp_rank.status_code != 200:
-        return pd.DataFrame()
-
-    raw = resp_rank.json()
     users_raw = []
-    if isinstance(raw, list):
-        users_raw = raw
-    elif isinstance(raw, dict):
-        users_raw = raw.get("u") or raw.get("users") or raw.get("items") or raw.get("ranking") or raw.get("it") or []
+    # Versuche verschiedene Endpunkte für die Managerliste in v4
+    endpoints = [
+        f"{API_BASE_URL}/v4/leagues/{league_id}/ranking",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/users",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/me"
+    ]
+    
+    for ep in endpoints:
+        resp_rank = fetch_with_retry(ep, headers)
+        if resp_rank and resp_rank.status_code == 200:
+            raw = resp_rank.json()
+            if isinstance(raw, list):
+                users_raw = raw
+                break
+            elif isinstance(raw, dict):
+                users_raw = raw.get("us") or raw.get("u") or raw.get("users") or raw.get("items") or raw.get("ranking") or raw.get("it") or []
+                if users_raw:
+                    break
 
-    # Liga-Feed zur Nachverfolgung der Käufe/Verkäufe
+    # Feed für Transferhistorie auslesen
     feed_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/feed", headers)
     net_transfers = {}
     
@@ -172,23 +181,20 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
             continue
             
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
-        name = u.get("n") or u.get("name") or u.get("userName") or "Manager"
+        name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        team_val = parse_num(u.get("tv") or u.get("teamValue"))
-        squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc"))
+        team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v"))
+        squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c"))
         
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
-        # Eigenes Budget ist exakt bekannt, fremde Manager werden geschätzt
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
-            # 180 Mio. Start-Gesamtwert (100m Kader + 80m Bar)
             start_cash_estimate = max(0, START_TOTAL_VALUE - team_val)
             transfer_balance = net_transfers.get(u_id, 0)
             est_cash = start_cash_estimate + transfer_balance
 
-        # Max Dispo (33% des Teamwerts im Minus)
         max_dispo = int(team_val * 0.33)
         max_available = est_cash + max_dispo
         
@@ -331,14 +337,13 @@ def main():
     </html>
     """
 
-    # E-MAIL VERSAND LOGIK WITH ROBUST FALLBACKS
+    # E-MAIL VERSAND LOGIK
     sender_email = SMTP_USER or KB_EMAIL
     sender_password = SMTP_PASSWORD or KB_PASSWORD
     recipient = EMAIL_TO or sender_email
 
     if not sender_email or not sender_password:
         print("FEHLER beim Mailversand: Keine SMTP-Anmeldedaten gefunden.")
-        print(f"Pfade gecheckt -> SMTP_USER: {bool(SMTP_USER)}, SMTP_PASSWORD: {bool(SMTP_PASSWORD)}, KB_EMAIL: {bool(KB_EMAIL)}, KB_PASSWORD: {bool(KB_PASSWORD)}")
         return
 
     print(f"Versuche E-Mail zu senden an {recipient} via {SMTP_SERVER}:{SMTP_PORT}...")
