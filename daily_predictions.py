@@ -141,6 +141,46 @@ def get_player_details(league_id, player_id, headers):
     return mv, change, pred, team_name
 
 
+def fetch_user_squad(league_id, u_id, headers):
+    """Sucht nach den genauen Kader- und Spielerdaten eines bestimmten Managers."""
+    squad_endpoints = [
+        f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/squad",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/players",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}"
+    ]
+    
+    players = []
+    team_val_direct = 0
+    
+    for ep in squad_endpoints:
+        resp = fetch_with_retry(ep, headers)
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                players = data
+                break
+            elif isinstance(data, dict):
+                team_val_direct = parse_num(data.get("tv") or data.get("teamValue") or data.get("v"))
+                players = (
+                    data.get("p") or 
+                    data.get("players") or 
+                    data.get("it") or 
+                    data.get("squad") or 
+                    data.get("items") or []
+                )
+                if players:
+                    break
+                    
+    calculated_val = 0
+    for p in players:
+        if isinstance(p, dict):
+            p_mv = parse_num(p.get("mv") or p.get("marketValue") or p.get("v"))
+            calculated_val += p_mv
+            
+    final_team_val = calculated_val if calculated_val > 0 else team_val_direct
+    return len(players), final_team_val
+
+
 def calculate_manager_budgets(league_id, my_user_id, headers):
     users_raw = []
     endpoints = [
@@ -157,7 +197,14 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                 users_raw = raw
                 break
             elif isinstance(raw, dict):
-                users_raw = raw.get("us") or raw.get("u") or raw.get("users") or raw.get("items") or raw.get("ranking") or raw.get("it") or []
+                users_raw = (
+                    raw.get("us") or 
+                    raw.get("u") or 
+                    raw.get("users") or 
+                    raw.get("items") or 
+                    raw.get("ranking") or 
+                    raw.get("it") or []
+                )
                 if users_raw:
                     break
 
@@ -188,21 +235,14 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        squad_count = 0
-        team_val = 0
+        # Gezielte Kaderabfrage über Sub-Endpunkte
+        squad_count, team_val = fetch_user_squad(league_id, u_id, headers)
         
-        user_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}", headers)
-        if user_resp and user_resp.status_code == 200:
-            udata = user_resp.json()
-            players = udata.get("p") or udata.get("players") or udata.get("it") or []
-            squad_count = len(players)
-            for p in players:
-                team_val += parse_num(p.get("mv") or p.get("marketValue") or p.get("v"))
-        
+        # Falls Kader-Abfrage den Wert nicht liefern konnte, Nutze Ranking-Werte
         if team_val == 0:
-            team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v"))
+            team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
         if squad_count == 0:
-            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c"))
+            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c") or u.get("squadCount"))
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
