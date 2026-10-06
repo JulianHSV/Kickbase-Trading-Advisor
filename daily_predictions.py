@@ -67,20 +67,18 @@ def parse_num(val):
 
 def extract_squad_count_from_dict(u_dict):
     """
-    Durchsucht ein Manager-Objekt aus v4 tiefenstrukturiert nach der Kadergröße.
+    Durchsucht ein Manager-Objekt tiefenstrukturiert nach der Kadergröße.
     """
     if not isinstance(u_dict, dict):
         return 0
         
-    # Direct keys
-    for k in ["s", "sc", "playerCount", "pc", "squadSize", "c", "sq", "playersCount", "p", "pl", "count"]:
+    for k in ["s", "sc", "playerCount", "pc", "squadSize", "c", "sq", "playersCount", "p", "pl", "count", "pls"]:
         if k in u_dict and isinstance(u_dict[k], (int, float, str)):
             parsed = parse_num(u_dict[k])
             if parsed > 0:
                 return parsed
                 
-    # Nested arrays or sub-dicts
-    for sub_key in ["squad", "players", "profile", "stats"]:
+    for sub_key in ["squad", "players", "profile", "stats", "u"]:
         if sub_key in u_dict:
             sub_val = u_dict[sub_key]
             if isinstance(sub_val, list):
@@ -200,36 +198,36 @@ def get_player_details(league_id, player_id, headers):
 
 
 # ==========================================
-# RANKING-BASED SQUAD & BUDGET EXTRACTION
+# RANKING & STATS DATA EXTRACTION
 # ==========================================
 
-def fetch_ranking_squad_data(league_id, headers):
+def fetch_ranking_and_stats_data(league_id, headers):
     squad_counts = {}
     team_values = {}
     
-    ranking_url = f"{API_BASE_URL}/v4/leagues/{league_id}/ranking"
-    resp = fetch_with_retry(ranking_url, headers)
-    
-    if resp and resp.status_code == 200:
-        data = resp.json()
-        items = data if isinstance(data, list) else (data.get("us") or data.get("users") or data.get("it") or data.get("ranking") or [])
-        
-        if isinstance(items, list):
-            for u in items:
-                u_id = str(u.get("i") or u.get("id") or u.get("uid") or "")
-                if u_id:
-                    sq_cnt = extract_squad_count_from_dict(u)
-                    tv_val = parse_num(
-                        u.get("tv") or u.get("teamValue") or u.get("v") or 
-                        u.get("value") or u.get("mvt") or u.get("m")
-                    )
-                    
-                    if sq_cnt > 0:
-                        squad_counts[u_id] = sq_cnt
-                    if tv_val > 0:
-                        team_values[u_id] = tv_val
+    # Abruf der Stats & Ranking Daten
+    for ep in [f"{API_BASE_URL}/v4/leagues/{league_id}/stats", f"{API_BASE_URL}/v4/leagues/{league_id}/ranking"]:
+        resp = fetch_with_retry(ep, headers)
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            items = data if isinstance(data, list) else (data.get("us") or data.get("users") or data.get("it") or data.get("ranking") or [])
+            
+            if isinstance(items, list):
+                for u in items:
+                    u_id = str(u.get("i") or u.get("id") or u.get("uid") or "")
+                    if u_id:
+                        sq_cnt = extract_squad_count_from_dict(u)
+                        tv_val = parse_num(
+                            u.get("tv") or u.get("teamValue") or u.get("v") or 
+                            u.get("value") or u.get("mvt") or u.get("m")
+                        )
+                        
+                        if sq_cnt > 0 and u_id not in squad_counts:
+                            squad_counts[u_id] = sq_cnt
+                        if tv_val > 0 and u_id not in team_values:
+                            team_values[u_id] = tv_val
 
-    print(f"[RANKING SUCCESS] Ligadaten für {len(team_values)} Manager erfolgreich ausgelesen.")
+    print(f"[RANKING & STATS] Ligadaten für {len(team_values)} Manager ausgelesen.")
     return squad_counts, team_values
 
 
@@ -263,7 +261,7 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
                 if users_raw:
                     break
 
-    squad_counts_rank, team_values_rank = fetch_ranking_squad_data(league_id, headers)
+    squad_counts_rank, team_values_rank = fetch_ranking_and_stats_data(league_id, headers)
 
     budget_list = []
     for u in users_raw:
@@ -286,6 +284,7 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
+        # Budget-Berechnung über 180 Mio. Baseline
         if u_id == str(my_user_id) and direct_budget != 0:
             est_cash = direct_budget
         else:
