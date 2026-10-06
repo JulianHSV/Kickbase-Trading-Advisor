@@ -182,34 +182,9 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        # Abfrage des spezifischen Manager-Profils für exakte Kaderwerte & Kadergröße
-        team_val = 0
+        # Kader-Details des einzelnen Managers holen
         squad_count = 0
-        user_detail_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}", headers)
+        team_val = 0
+        user_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}", headers)
         
-        if user_detail_resp and user_detail_resp.status_code == 200:
-            ud = user_detail_resp.json()
-            players = ud.get("p") or ud.get("players") or ud.get("it") or []
-            squad_count = len(players)
-            
-            # Marktwerte aller Spieler im Kader summieren
-            for p in players:
-                team_val += parse_num(p.get("mv") or p.get("marketValue") or p.get("v"))
-            
-            # Falls v4 den Gesamtwert direkt im Profil als 'tv' mitgibt
-            direct_tv = parse_num(ud.get("tv") or ud.get("teamValue") or ud.get("kv"))
-            if direct_tv > team_val:
-                team_val = direct_tv
-
-        # Fallback auf Werte aus der Rangliste, falls die Detailabfrage fehlschlägt
-        if team_val == 0:
-            team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v"))
-        if squad_count == 0:
-            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c"))
-
-        direct_budget = parse_num(u.get("b") or u.get("budget"))
-        
-        if u_id == str(my_user_id) and direct_budget != 0:
-            est_cash = direct_budget
-        else:
-            start_cash_
+        if user_resp and
