@@ -10,7 +10,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Anmeldedaten und Ausweich-Variablen für GitHub Secrets
+# ==========================================
+# CONFIGURATION & ENVIRONMENT VARIABLES
+# ==========================================
+
 KB_EMAIL = os.getenv("KB_EMAIL") or os.getenv("KICK_USER")
 KB_PASSWORD = os.getenv("KB_PASSWORD") or os.getenv("KICK_PASS")
 
@@ -29,10 +32,13 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=UTF-8"
 }
 
-# Liga-Regeln
-START_TOTAL_VALUE = 180000000  # 100 Mio. Kaderwert + 80 Mio. Startbudget
-MAX_SQUAD_SIZE = 20           # Max. 20 Spieler im Kader
+START_TOTAL_VALUE = 180000000  # 100M Baseline + 80M Start
+MAX_SQUAD_SIZE = 20
 
+
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 
 def fmt_de(val):
     if pd.isna(val) or val is None:
@@ -64,7 +70,12 @@ def fetch_with_retry(url, headers, max_retries=3):
 
 def login():
     login_url = f"{API_BASE_URL}/v4/user/login"
-    payload = {"em": KB_EMAIL.strip(), "pass": KB_PASSWORD.strip(), "loy": False, "rep": {}}
+    payload = {
+        "em": KB_EMAIL.strip(),
+        "pass": KB_PASSWORD.strip(),
+        "loy": False,
+        "rep": {}
+    }
     
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
@@ -97,6 +108,10 @@ def extract_history_val(item):
     return 0
 
 
+# ==========================================
+# PLAYER DETAILS & MARKET VALUE LOGIC
+# ==========================================
+
 def get_player_details(league_id, player_id, headers):
     urls = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/players/{player_id}",
@@ -118,7 +133,7 @@ def get_player_details(league_id, player_id, headers):
     mv = parse_num(p.get("mv") or p.get("marketValue"))
     team_name = p.get("tn") or p.get("teamName") or p.get("t") or "Unbekannt"
     
-    # Korrekte Marktwert-Änderung ermitteln (tfhmvt = 24h Trend in Kickbase v4)
+    # Kickbase v4 Marktwert-Änderung (24h Trend)
     change = parse_num(p.get("tfhmvt"))
     
     if change == 0:
@@ -141,8 +156,11 @@ def get_player_details(league_id, player_id, headers):
     return mv, change, pred, team_name
 
 
+# ==========================================
+# MANAGER BUDGET & SQUAD CALCULATION
+# ==========================================
+
 def fetch_user_squad(league_id, u_id, headers):
-    """Sucht nach den genauen Kader- und Spielerdaten eines bestimmten Managers."""
     squad_endpoints = [
         f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/squad",
         f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}/players",
@@ -216,7 +234,7 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         items = feed_data.get("it") or feed_data.get("items") or []
         for item in items:
             item_type = item.get("t") or item.get("type")
-            u_id = item.get("uid") or item.get("userId")
+            u_id = str(item.get("uid") or item.get("userId"))
             amount = parse_num(item.get("a") or item.get("amount") or item.get("v"))
             
             if u_id and amount > 0:
@@ -235,14 +253,12 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
         u_id = str(u.get("i") or u.get("id") or u.get("uid"))
         name = u.get("n") or u.get("name") or u.get("userName") or u.get("un") or "Manager"
         
-        # Gezielte Kaderabfrage über Sub-Endpunkte
         squad_count, team_val = fetch_user_squad(league_id, u_id, headers)
         
-        # Falls Kader-Abfrage den Wert nicht liefern konnte, Nutze Ranking-Werte
         if team_val == 0:
             team_val = parse_num(u.get("tv") or u.get("teamValue") or u.get("v") or u.get("value"))
         if squad_count == 0:
-            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c") or u.get("squadCount"))
+            squad_count = parse_num(u.get("sc") or u.get("playerCount") or u.get("pc") or u.get("c") or u.get("squadSize"))
 
         direct_budget = parse_num(u.get("b") or u.get("budget"))
         
@@ -266,6 +282,10 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
 
     return pd.DataFrame(budget_list)
 
+
+# ==========================================
+# MAIN EXECUTION & HTML REPORT
+# ==========================================
 
 def main():
     print("Starte Kickbase Report...")
@@ -357,7 +377,7 @@ def main():
         df_squad = df_squad.sort_values(by="change_raw", ascending=False)
         df_squad = df_squad.drop(columns=["change_raw"])
 
-    # HTML TEMPLATE
+    # HTML TEMPLATE & EMAIL BUILD
     today_str = datetime.now().strftime("%d-%m-%Y")
     
     html_content = f"""
@@ -396,7 +416,6 @@ def main():
     </html>
     """
 
-    # E-MAIL VERSAND LOGIK
     sender_email = SMTP_USER or KB_EMAIL
     sender_password = SMTP_PASSWORD or KB_PASSWORD
     recipient = EMAIL_TO or sender_email
