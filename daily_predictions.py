@@ -184,56 +184,69 @@ def fetch_all_league_transfers_and_squads(league_id, headers):
     net_transfers = {}
     squad_counts = {}
     
-    cursor_dt = None
-    max_pages = 50
-    page = 0
+    # Korrektur der v4 Endpunkte für den Liga-Feed basierend auf dem Log (404 /feed behoben)
+    feed_endpoints = [
+        f"{API_BASE_URL}/v4/leagues/{league_id}/activity",
+        f"{API_BASE_URL}/v4/leagues/{league_id}/news",
+        f"{API_BASE_URL}/v3/leagues/{league_id}/feed"
+    ]
 
     print("[FEED] Starte tiefen Abruf aller historischen Liga-Transfers...")
 
-    while page < max_pages:
-        if cursor_dt:
-            url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed?dt={cursor_dt}"
-        else:
-            url = f"{API_BASE_URL}/v4/leagues/{league_id}/feed"
+    for ep_base in feed_endpoints:
+        cursor_dt = None
+        max_pages = 50
+        page = 0
+        found_data = False
 
-        resp = fetch_with_retry(url, headers)
-        if not resp or resp.status_code != 200:
-            print(f"[FEED WARN] Abruf gestoppt bei Seite {page}")
-            break
+        while page < max_pages:
+            if cursor_dt:
+                url = f"{ep_base}?dt={cursor_dt}"
+            else:
+                url = ep_base
+
+            resp = fetch_with_retry(url, headers)
+            if not resp or resp.status_code != 200:
+                break
+                
+            data = resp.json()
+            items = data.get("it") or data.get("items") or data.get("a") or []
             
-        data = resp.json()
-        items = data.get("it") or data.get("items") or []
-        
-        if not items:
+            if not items or not isinstance(items, list):
+                break
+
+            found_data = True
+            for item in items:
+                item_type = item.get("t") or item.get("type")
+                u_id = str(item.get("uid") or item.get("userId") or item.get("u") or "")
+                amount = parse_num(item.get("a") or item.get("amount") or item.get("v") or item.get("p"))
+                
+                cursor_dt = item.get("dt") or item.get("date") or cursor_dt
+
+                if not u_id:
+                    continue
+
+                if u_id not in net_transfers:
+                    net_transfers[u_id] = 0
+                if u_id not in squad_counts:
+                    squad_counts[u_id] = 0
+
+                # Transfer-Auswertung (12 = Kauf, 13 = Verkauf)
+                if item_type in [12, "buy", "BUY"]:
+                    if amount > 0:
+                        net_transfers[u_id] -= amount
+                    squad_counts[u_id] += 1
+
+                elif item_type in [13, "sell", "SELL"]:
+                    if amount > 0:
+                        net_transfers[u_id] += amount
+                    squad_counts[u_id] = max(0, squad_counts[u_id] - 1)
+
+            page += 1
+
+        if found_data:
+            print(f"[FEED SUCCESS] Erfolgreich Daten abgerufen von: {ep_base}")
             break
-
-        for item in items:
-            item_type = item.get("t") or item.get("type")
-            u_id = str(item.get("uid") or item.get("userId") or item.get("u") or "")
-            amount = parse_num(item.get("a") or item.get("amount") or item.get("v") or item.get("p"))
-            
-            cursor_dt = item.get("dt") or item.get("date") or cursor_dt
-
-            if not u_id:
-                continue
-
-            if u_id not in net_transfers:
-                net_transfers[u_id] = 0
-            if u_id not in squad_counts:
-                squad_counts[u_id] = 0
-
-            # Transfer-Auswertung (12 = Kauf, 13 = Verkauf)
-            if item_type in [12, "buy", "BUY"]:
-                if amount > 0:
-                    net_transfers[u_id] -= amount
-                squad_counts[u_id] += 1
-
-            elif item_type in [13, "sell", "SELL"]:
-                if amount > 0:
-                    net_transfers[u_id] += amount
-                squad_counts[u_id] = max(0, squad_counts[u_id] - 1)
-
-        page += 1
 
     print(f"[FEED SUCCESS] Transfers von {len(net_transfers)} Managern erfolgreich verarbeitet.")
     return net_transfers, squad_counts
@@ -289,6 +302,13 @@ def calculate_manager_budgets(league_id, my_user_id, headers):
             u.get("pc") or u.get("squadSize") or u.get("c") or u.get("sq") or u.get("playersCount")
         )
         
+        # Zusätzlicher Fallback: Abruf des spezifischen User-Objekts
+        if squad_count == 0:
+            u_detail_resp = fetch_with_retry(f"{API_BASE_URL}/v4/leagues/{league_id}/users/{u_id}", headers)
+            if u_detail_resp and u_detail_resp.status_code == 200:
+                u_data = u_detail_resp.json()
+                squad_count = parse_num(u_data.get("sc") or u_data.get("playerCount") or u_data.get("s") or u_data.get("c"))
+
         # Fallback auf die gezählten Feed-Käufe
         if squad_count == 0 and u_id in squad_counts_feed:
             squad_count = squad_counts_feed[u_id]
